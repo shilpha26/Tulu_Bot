@@ -1,0 +1,26 @@
+{
+  "name": "tulu-learning-bot",
+  "version": "1.0.0",
+  "description": "Learning Tulu Translator Bot for Telegram",
+  "main": "telegram-bot.js",
+  "scripts": {
+    "start": "node telegram-bot.js",
+    "dev": "node telegram-bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "tulu",
+    "translator"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "node-fetch": "^2.7.0",
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
