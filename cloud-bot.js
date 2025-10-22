@@ -199,11 +199,9 @@ async function tryAPITranslation(text) {
     
     console.log(`🔍 Trying Google Translate with authentic Tulu code (tcy) for: "${text}"`);
     
-    // YOUR WORKING API URL with Tulu language code
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tcy&dt=t&q=${encodeURIComponent(text)}`;
     
     try {
-        // small delay for reliability
         await new Promise(resolve => setTimeout(resolve, 1000));
         
         const controller = new AbortController();
@@ -222,16 +220,24 @@ async function tryAPITranslation(text) {
         }
         
         const result = await response.json();
-        // Typical Google Translate structure: result[0] is an array of translation pieces
+        
+        // Validate response structure and content
         if (Array.isArray(result) && Array.isArray(result[0])) {
-            const pieces = result[0].map(part => Array.isArray(part) ? part[0] : '').filter(Boolean);
+            const pieces = result[0]
+                .map(part => Array.isArray(part) ? part[0] : '')
+                .filter(Boolean);
+            
             const translation = pieces.join('').trim();
-            if (translation) {
-                return { translation, source: 'GoogleTranslate (tcy)' };
+            
+            // Reject if empty or contains Kannada script (likely wrong script)
+            if (!translation || /[\u0C80-\u0CFF]/.test(translation)) {
+                console.log('🚫 Invalid translation or wrong script received from API');
+                return null;
             }
+            
+            return { translation, source: 'GoogleTranslate (tcy)' };
         }
         
-        // Fallback: no usable translation
         return null;
     } catch (error) {
         console.log(`🚫 Tulu API error: ${error && error.name === 'AbortError' ? 'timeout' : error.message}`);
@@ -305,11 +311,21 @@ async function saveToTaughtDictionary(englishWord, tuluWord, userInfo = null) {
 
 // Save API result to cache
 async function saveToAPICache(englishWord, translation, apiSource) {
+    // Don't cache empty or Kannada script responses
+    if (!translation || /[\u0C80-\u0CFF]/.test(translation)) {
+        console.log('🚫 Skipping cache for invalid/Kannada script response');
+        return;
+    }
+
     const key = englishWord.toLowerCase().trim();
 
     if (!mongoAvailable || !db) {
         // Memory-mode: store in in-process apiCache
-        apiCache[key] = { translation: translation.trim(), source: apiSource, createdAt: Date.now() };
+        apiCache[key] = { 
+            translation: translation.trim(), 
+            source: apiSource, 
+            createdAt: Date.now() 
+        };
         console.log(`🌐 (memory) API Cache: "${englishWord}" = "${translation}" (${apiSource})`);
         return;
     }
@@ -361,7 +377,7 @@ async function loadFromAPICache(englishWord) {
 
     if (!mongoAvailable || !db) {
         const mem = apiCache[key];
-        if (mem) {
+        if (mem && !(/[\u0C80-\u0CFF]/.test(mem.translation))) {
             console.log(`🌐 (memory) Cache hit: "${englishWord}" = "${mem.translation}"`);
             return { translation: mem.translation, source: mem.source || 'memory' };
         }
@@ -373,7 +389,7 @@ async function loadFromAPICache(englishWord) {
             english: key
         });
         
-        if (cached) {
+        if (cached && !(/[\u0C80-\u0CFF]/.test(cached.translation))) {
             console.log(`🌐 Cache hit: "${englishWord}" = "${cached.translation}"`);
             return { translation: cached.translation, source: cached.api_source };
         }
@@ -860,21 +876,32 @@ ${mongoAvailable ? '✅ **Permanent cloud storage** - Helps everyone' : '✅ **S
     await bot.sendMessage(msg.chat.id, message, {parse_mode: 'Markdown'});
 });
 
-// Enhanced /correct command for taught dictionary
-bot.onText(/\/correct (.+)/, async (msg, match) => {
+// Enhanced /correct command handler
+bot.onText(/^\/correct(?:\s+(.+)|$)/, async (msg, match) => {
     extendKeepAlive();
     
     const userId = msg.from.id;
     const userName = msg.from.first_name || 'User';
+    
+    // Check if a word was provided
+    if (!match[1]) {
+        await bot.sendMessage(msg.chat.id, `❌ **Please specify a word to correct**
+
+**Usage:** /correct <word>
+**Example:** /correct hello
+
+This command lets you update existing translations in the taught dictionary.
+Base dictionary words cannot be modified.`, {parse_mode: 'Markdown'});
+        return;
+    }
+
     const wordToCorrect = match[1].toLowerCase().trim();
     
-    // Check taught dictionary
+    // Get current translation
     const taughtWords = await getCachedTaughtWords();
-    const fullDictionary = { ...tuluDictionary, ...taughtWords };
+    const currentTranslation = tuluDictionary[wordToCorrect] || taughtWords[wordToCorrect];
     
-    if (fullDictionary[wordToCorrect]) {
-        const currentTranslation = fullDictionary[wordToCorrect];
-        
+    if (currentTranslation) {
         // Check if it's from base dictionary
         if (tuluDictionary[wordToCorrect]) {
             await bot.sendMessage(msg.chat.id, `❌ **Cannot Correct Base Dictionary**
@@ -883,69 +910,52 @@ bot.onText(/\/correct (.+)/, async (msg, match) => {
 🔒 **Current:** "${currentTranslation}"
 📚 **Source:** Built-in verified dictionary
 
-**Why can't I correct this?**
-Base dictionary words are verified Tulu. However, you can:
-
-1️⃣ **Add variation:** Ask me "${wordToCorrect} alternative" 
-2️⃣ **Teach regional version:** Use slightly different phrasing
-3️⃣ **Contribute new words:** Help expand taught dictionary
-
-💡 **Focus on teaching new authentic Tulu words!**`, {parse_mode: 'Markdown'});
+Base dictionary words cannot be modified.`, {parse_mode: 'Markdown'});
             return;
         }
         
-        // Set up correction mode for taught dictionary words
+        // Set correction mode
         userStates[userId] = {
             mode: 'correcting',
             englishWord: wordToCorrect,
             originalText: wordToCorrect,
             oldTranslation: currentTranslation,
-            correctorName: userName,
             timestamp: Date.now()
         };
         
         await bot.sendMessage(msg.chat.id, `🔧 **Correction Mode**
 
 📝 **English:** "${wordToCorrect}"
-🔄 **Current Translation:** "${currentTranslation}"
-🗄️ **Source:** User-taught dictionary
+🔄 **Current:** "${currentTranslation}"
 
-✏️ **Send the correct Tulu translation:**
-
-**What happens:**
-• Updates taught_dictionary collection
-• Your correction gets attribution
-• All users see improved translation
-
-**Commands:**
-• **/skip** - Cancel correction
-• Type correct translation to proceed
-
-⏰ **Expires in 10 minutes**`, {parse_mode: 'Markdown'});
-        
-        // Auto-expire correction
-        setTimeout(() => {
-            if (userStates[userId] && userStates[userId].mode === 'correcting' && 
-                userStates[userId].englishWord === wordToCorrect) {
-                delete userStates[userId];
-                bot.sendMessage(msg.chat.id, `⏰ **Correction expired for "${wordToCorrect}"**
-
-You can start a new correction anytime:
-**/correct ${wordToCorrect}**`).catch(() => {});
-            }
-        }, 10 * 60 * 1000);
+Please send the new Tulu translation:
+*(or /skip to cancel)*`, {parse_mode: 'Markdown'});
         
     } else {
-        await bot.sendMessage(msg.chat.id, `❌ **Word Not Found**
+        await bot.sendMessage(msg.chat.id, `❓ Word "${wordToCorrect}" not found in any dictionary.
 
-📝 **"${wordToCorrect}"** is not in any collection yet.
+Try asking me to translate it first!`, {parse_mode: 'Markdown'});
+    }
+});
 
-🎯 **What you can do:**
-1️⃣ **Add it first:** Ask me "${wordToCorrect}" and teach the translation
-2️⃣ **Check spelling:** Verify the English word is correct
-3️⃣ **Browse words:** Use **/learned** to see taught dictionary
-
-💡 **Once you teach "${wordToCorrect}", you can use /correct to improve it.**`, {parse_mode: 'Markdown'});
+// Clear chat history command
+bot.onText(/\/clear/, async (msg) => {
+    try {
+        // Get chat history and delete messages
+        const messages = await bot.getChatHistory(msg.chat.id, 100);
+        for (const message of messages) {
+            await bot.deleteMessage(msg.chat.id, message.message_id);
+        }
+        
+        // Send confirmation that will auto-delete after 3 seconds
+        const confirmation = await bot.sendMessage(msg.chat.id, "🧹 Chat cleared!");
+        setTimeout(() => {
+            bot.deleteMessage(msg.chat.id, confirmation.message_id).catch(() => {});
+        }, 3000);
+        
+    } catch (error) {
+        console.error('Clear chat error:', error);
+        await bot.sendMessage(msg.chat.id, "❌ Could not clear chat. Make sure I have admin rights.");
     }
 });
 
@@ -1007,110 +1017,72 @@ bot.onText(/\/numbers/, (msg) => {
     bot.sendMessage(msg.chat.id, numbersMessage, {parse_mode: 'Markdown'});
 });
 
-// Enhanced main message handler with corrected strategy
+// Enhanced main message handler with learning flow
 bot.on('message', async (msg) => {
-    if (msg.text && !msg.text.startsWith('/')) {
-        const userText = msg.text.trim();
-        const userId = msg.from.id;
-        const userName = msg.from.first_name || 'User';
+    if (!msg.text || msg.text.startsWith('/')) return;
+
+    const userText = msg.text.trim();
+    const userId = msg.from.id;
+    const userName = msg.from.first_name;
+    
+    // Update last activity for keep-alive
+    extendKeepAlive();
+    
+    console.log(`📩 ${userName}: "${userText}"`);
+
+    // Handle learning/correction mode
+    if (userStates[userId]) {
+        const state = userStates[userId];
         
-        extendKeepAlive();
-        console.log(`📩 ${userName}: "${userText}"`);
-        
-        // Use cached taught dictionary for better performance
-        if (mongoAvailable) {
-            learnedWords = await getCachedTaughtWords();
-        }
-        
-        // Handle learning mode (user teaching authentic Tulu)
-        if (userStates[userId]) {
-            const userState = userStates[userId];
+        if (state.mode === 'learning') {
+            // User is teaching a new word
+            const learned = await learnNewWord(state.englishWord, userText, userId, userName);
             
-            if (userState.mode === 'learning') {
-                // User is teaching authentic Tulu to taught_dictionary
-                const userInfo = `${userName} (${userId})`;
-                const success = await learnNewWord(userState.englishWord, userText, userId, userInfo);
-                
-                if (success) {
-                    const storageType = mongoAvailable ? 'taught_dictionary collection with 5-min cache' : 'session memory';
-                    const impact = mongoAvailable ? 'Available to ALL users globally with optimized performance!' : 'Available in current session';
-                    
-                    const successMessage = `✅ **Authentic Tulu Added Successfully!**
+            if (learned) {
+                await bot.sendMessage(msg.chat.id, `✅ **Thank you for teaching!**
 
-📝 **English:** ${userState.originalText}  
-🏛️ **Authentic Tulu:** ${userText}
-👤 **Contributor:** ${userName} (attributed)
-🗄️ **Stored in:** MongoDB ${storageType}
+📝 **English:** "${state.originalText}"
+🏛️ **Tulu:** "${userText}"
+👤 **Contributor:** ${userName}
 
-**This is exactly how we build authentic Tulu database!**
-• API didn't have "${userState.originalText}"
-• You provided the authentic Tulu word
-• Now everyone benefits from your knowledge
+Your authentic Tulu word has been added to the taught dictionary.
+*Use /correct anytime to improve it further.*
 
-**Test it:** Ask me "${userState.originalText}" again for <5ms response!
-**Share it:** Tell others to try "${userState.originalText}"
-
-🙏 **Thank you for preserving authentic Tulu with optimal performance!**`;
-
-                    await bot.sendMessage(msg.chat.id, successMessage, {parse_mode: 'Markdown'});
-                } else {
-                    await bot.sendMessage(msg.chat.id, `❌ **Could not save authentic Tulu**
-
-Please try again: Ask me "${userState.originalText}" and provide the authentic Tulu translation.
-
-💡 **Tips for authentic contributions:**
-• Use Roman letters (English alphabet)
-• Provide the most authentic/common Tulu version
-• Double-check spelling before submitting
-
-⚡ **Performance benefit:** Your word will be cached for 5 minutes for instant access!`);
-                    delete userStates[userId];
-                }
-                return;
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`, {parse_mode: 'Markdown'});
             }
-
-            if (userState.mode === 'correcting') {
-    // User correcting taught dictionary entry
-    const oldTranslation = userState.oldTranslation;
-    const correctorInfo = `${userName} (Corrector)`;
-    const success = await learnNewWord(userState.englishWord, userText, userId, correctorInfo);
-    
-    if (success) {
-        // Force cache refresh for immediate effect
-        lastCacheUpdate = 0;
-        await getCachedTaughtWords();
-        
-        const correctionMessage = `✅ **Dictionary Updated Successfully!**
-
-📝 **English:** ${userState.originalText}
-❌ **Previous:** ${oldTranslation}  
-✅ **Your Correction:** ${userText}
-👤 **Corrected by:** ${userName}
-
-🗄️ **Collection:** taught_dictionary updated
-💾 **Cache:** Immediately refreshed
-🌍 **Effect:** All users see your correction
-
-**Verify:** Ask me "${userState.originalText}" for confirmation`;
-
-        await bot.sendMessage(msg.chat.id, correctionMessage, {parse_mode: 'Markdown'});
-    } else {
-        await bot.sendMessage(msg.chat.id, `❌ **Correction failed**
-
-Please try: **/correct ${userState.originalText}** again`);
-        delete userStates[userId];
-    }
-    return;
-}
+            return;
         }
         
-        // Normal translation request with enhanced authentic strategy
-        const englishPattern = /^[a-zA-Z0-9\s.,!?'"-]+$/;
-        
-        if (englishPattern.test(userText)) {
-    bot.sendChatAction(msg.chat.id, 'typing');
-    
+        if (state.mode === 'correcting') {
+            // User is correcting an existing word
+            const corrected = await learnNewWord(
+                state.englishWord, 
+                userText, 
+                userId,
+                userName
+            );
+            
+            if (corrected) {
+                await bot.sendMessage(msg.chat.id, `✅ **Word Updated Successfully**
+
+📝 **English:** "${state.englishWord}"
+🔄 **Old:** "${state.oldTranslation}"
+🆕 **New:** "${userText}"
+👤 **Updated by:** ${userName}
+
+The dictionary has been updated with your correction.`, {parse_mode: 'Markdown'});
+                
+                delete userStates[userId];
+            }
+            return;
+        }
+    }
+
+    // Normal translation flow
     const result = await translateToTulu(userText, userId);
+    
+    let responseMessage = '';
     
     if (result.found) {
         const tierEmoji = {
@@ -1121,131 +1093,34 @@ Please try: **/correct ${userState.originalText}** again`);
             5: '❓'  // Unknown
         }[result.tier] || '✅';
         
-        const priority = {
-            1: 'Highest (<1ms)', 
-            2: 'High (<5ms Cached)', 
-            3: 'Good (<50ms)',
-            4: 'Medium (Tulu API)', 
-            5: 'Learning'
-        }[result.tier] || 'Standard';
-        
-        // ✅ FIXED: Declare base message first
-        let responseMessage = `${tierEmoji} **Authentic Tulu Translation Found**
+        responseMessage = `${tierEmoji} **Authentic Tulu Translation Found**
 
 📝 **English:** ${userText}
 🏛️ **Translation:** ${result.translation}
 
-📊 **Source:** ${result.source}
-⭐ **Performance:** ${priority}
-🗄️ **Database:** ${mongoAvailable ? 'Enhanced MongoDB Collections (Optimized)' : 'Memory + Tulu API'}`;
+📊 **Source:** ${result.source}`;
 
-        // ✅ FIXED: Now add tier-specific content with proper if-else
-        if (result.tier === 4 && result.needsVerification) {
+        if (result.needsVerification) {
             responseMessage += `
 
-🌐 **Google Translate Tulu API Result:**
-• Used authentic Tulu language code (tcy)
-• May be approximate translation
-• **Improve it:** **/correct ${userText.toLowerCase()}**
-• Your correction provides authentic Tulu for everyone`;
-        } else if (result.tier === 3) {
-            responseMessage += `
-
-💾 **Previously Cached API Result:**
-• From earlier Google Translate (tcy) attempt
-• **Improve it:** **/correct ${userText.toLowerCase()}** with authentic Tulu`;
-        } else if (result.tier === 2) {
-            responseMessage += `
-
-🎯 **Authentic User-Taught Translation:**
-• Retrieved from 5-minute smart cache
-• Contributed by community member
-• Authentic and verified by native speaker
-• **Improve it:** **/correct ${userText.toLowerCase()}** if needed`;
-        } else {
-            responseMessage += `
-
-💡 **Perfect!** Use **/correct ${userText.toLowerCase()}** to add community improvements`;
+💡 **Help improve:** Use **/correct ${userText.toLowerCase()}** to add authentic Tulu`;
         }
+        
+    } else {
+        responseMessage = `❓ **Teach me authentic Tulu!**
 
-        responseMessage += `
+I don't know how to say "${userText}" in authentic Tulu yet.
+
+Please reply with the correct Tulu translation using Roman letters (English alphabet).
+*(or use /skip to cancel)*`;
+    }
+    
+    responseMessage += `
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`;
-
-                await bot.sendMessage(msg.chat.id, responseMessage, {parse_mode: 'Markdown'});
-                
-            } else {
-                // THIS IS THE KEY - No translation found anywhere, ask for AUTHENTIC TULU
-                const taughtStats = await getTaughtDictionaryStats();
-                const cacheStats = await getAPICacheStats();
-                
-                const learnMessage = `🏛️ **"${userText}" - Need Authentic Tulu!**
-
-🔍 **Complete Search Strategy Executed:**
-✅ ${Object.keys(tuluDictionary).length} base dictionary words (<1ms)
-✅ ${taughtStats.count} taught dictionary words (<5ms cached)
-✅ ${cacheStats.count} cached API translations (<50ms)
-✅ Google Translate API with Tulu code (tcy) - **No result found**
-
-**🔑 This is PERFECT for building authentic Tulu database!**
-
-🎯 **Teach Authentic Tulu:**
-Reply with the correct **authentic Tulu** translation (Roman letters)
-
-**Why this approach works:**
-🏛️ **APIs don't have good Tulu** - That's why it failed
-🌍 **You provide authentic word** - Real Tulu from native speaker
-📚 **Everyone benefits** - Your word helps all users globally
-🥇 **Tier 2 priority** - Always beats any future API attempts
-💾 **Smart caching** - 5-minute cache for blazing-fast lookup
-📈 **Database growth** - Each word makes the system more authentic
-
-**Examples of authentic Tulu contributions:**
-• "I miss you" → "[translate:yaan ninna miss madtini]"
-• "How's everything?" → "[translate:yelaa ide?]"
-• "Take care" → "[translate:jagrathegiri]"
-
-⏰ **Teaching request expires in 10 minutes**
-🔧 **Commands:** **/skip** to cancel
-
-🏛️ **This is exactly how we preserve authentic Tulu - API fails, you teach!**`;
-
-                await bot.sendMessage(msg.chat.id, learnMessage, {parse_mode: 'Markdown'});
-                
-                // Auto-expire learning request
-                setTimeout(() => {
-                    if (userStates[userId] && userStates[userId].englishWord === userText.toLowerCase()) {
-                        delete userStates[userId];
-                        bot.sendMessage(msg.chat.id, `⏰ **Teaching request expired for "${userText}"**
-
-🔄 **Ready for new authentic translations!**
-💡 **Try different words** or browse **/learned** to see authentic contributions`).catch(() => {});
-                    }
-                }, 10 * 60 * 1000);
-            }
-        } else {
-            const taughtStats = await getTaughtDictionaryStats();
-            const totalWords = Object.keys(tuluDictionary).length + taughtStats.count;
-            
-            await bot.sendMessage(msg.chat.id, `❌ **Please send English text only**
-
-✅ **Supported formats:**
-• English words and phrases
-• Numbers (handled by base dictionary with <1ms lookup)
-• Simple punctuation
-
-📊 **Authentic Tulu Strategy:**
-• ${totalWords}+ words across optimized collections
-• Google Translate API (tcy) → User teaching for authentic Tulu
-• Smart caching with reduced timeouts
-• Community-driven authentic preservation
-
-🎯 **Goal:** English → **Authentic Tulu** (Roman letters) 
-💡 **Try:** "hello" (<1ms), "thank you" (<1ms), "I love you" (teach authentic!)
-
-🏛️ **Building the most authentic Tulu database with optimal performance!**`);
-        }
+    
+    await bot.sendMessage(msg.chat.id, responseMessage, {parse_mode: 'Markdown'});
 });
 
 // Error handling
