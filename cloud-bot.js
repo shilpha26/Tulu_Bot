@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const { MongoClient } = require('mongodb');
-require('dotenv').config();
+// require('dotenv').config();
 
 // Use global fetch on Node 18+; fall back to node-fetch only if necessary
 const fetch = (typeof global.fetch === 'function') 
