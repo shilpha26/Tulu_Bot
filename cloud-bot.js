@@ -1,7 +1,23 @@
 const TelegramBot = require('node-telegram-bot-api');
-const fetch = require('node-fetch');
 const express = require('express');
 const { MongoClient } = require('mongodb');
+
+// Use global fetch on Node 18+; fall back to node-fetch only if necessary
+const fetch = (typeof global.fetch === 'function') 
+    ? global.fetch 
+    : (() => {
+        try { return require('node-fetch'); } 
+        catch (e) {
+            console.error('❌ fetch is not available. Use Node 18+ or install node-fetch (CJS/Esm mismatch may occur).');
+            process.exit(1);
+        }
+    })();
+
+// Ensure AbortController is available (Node 18+ has it)
+if (typeof global.AbortController === 'undefined') {
+    try { global.AbortController = require('abort-controller'); } 
+    catch (e) { console.warn('⚠️ AbortController not found; timeouts may not work reliably.'); }
+}
 
 // SECURE: Only use environment variables
 const token = process.env.TELEGRAM_TOKEN;
@@ -54,19 +70,22 @@ function startKeepAlive() {
         }
         
         try {
-            const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-            const response = await fetch(`${baseUrl}/health`, {
-                timeout: 5000,  // OPTIMIZED: Reduced from 10000
-                headers: { 'User-Agent': 'TuluBot-KeepAlive/1.0' }
-            });
-            
-            if (response.ok) {
-                const remainingTime = Math.ceil((KEEP_ALIVE_DURATION - timeSinceActivity) / (60 * 1000));
-                console.log(`🏓 Keep-alive ping successful - ${remainingTime} min remaining`);
+                const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 5000);
+                const response = await fetch(`${baseUrl}/health`, {
+                    signal: controller.signal,
+                    headers: { 'User-Agent': 'TuluBot-KeepAlive/1.0' }
+                });
+                clearTimeout(timeout);
+                
+                if (response.ok) {
+                    const remainingTime = Math.ceil((KEEP_ALIVE_DURATION - timeSinceActivity) / (60 * 1000));
+                    console.log(`🏓 Keep-alive ping successful - ${remainingTime} min remaining`);
+                }
+            } catch (error) {
+                console.log('🚨 Keep-alive ping failed:', (error && error.name === 'AbortError') ? 'timeout' : error.message);
             }
-        } catch (error) {
-            console.log('🚨 Keep-alive ping failed:', error.message);
-        }
     }, PING_INTERVAL);
 }
 
@@ -184,44 +203,45 @@ async function tryAPITranslation(text) {
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tcy&dt=t&q=${encodeURIComponent(text)}`;
     
     try {
-        // Your working delay for better reliability
+        // small delay for reliability
         await new Promise(resolve => setTimeout(resolve, 1000));
         
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
         const response = await fetch(url, {
             headers: { 
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' 
             },
-            timeout: 8000  // Reasonable timeout
+            signal: controller.signal
         });
+        clearTimeout(timeout);
         
-        if (response.ok) {
-            const result = await response.json();
-            if (result && result[0] && result[0][0] && result[0][0][0]) {
-                const translation = result[0][0][0].trim();
-                
-                // Your working validation logic
-                if (translation.length > 2 && 
-                    translation !== text.toLowerCase() && 
-                    !translation.includes('undefined') &&
-                    !translation.includes('INVALID') &&
-                    !translation.includes('ERROR')) {
-                    
-                    console.log(`✅ Tulu API success: "${translation}"`);
-                    return { translation, source: 'Google Translate (Tulu tcy)' };
-                }
+        if (!response.ok) {
+            console.log(`🚫 Tulu API responded with status ${response.status}`);
+            return null;
+        }
+        
+        const result = await response.json();
+        // Typical Google Translate structure: result[0] is an array of translation pieces
+        if (Array.isArray(result) && Array.isArray(result[0])) {
+            const pieces = result[0].map(part => Array.isArray(part) ? part[0] : '').filter(Boolean);
+            const translation = pieces.join('').trim();
+            if (translation) {
+                return { translation, source: 'GoogleTranslate (tcy)' };
             }
         }
+        
+        // Fallback: no usable translation
+        return null;
     } catch (error) {
-        console.log(`🚫 Tulu API error: ${error.message}`);
+        console.log(`🚫 Tulu API error: ${error && error.name === 'AbortError' ? 'timeout' : error.message}`);
+        return null;
     }
-    
-    // This is the KEY - when API fails, we ask for user input for authentic Tulu
-    console.log(`🎯 No Tulu API result for "${text}" - will request authentic user contribution`);
-    return null;
 }
 
 // OPTIMIZED cache system for taught dictionary
 let taughtWordsCache = {};
+let apiCache = {}; // <-- in-memory API cache for fallback mode
 let lastCacheUpdate = 0;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
@@ -240,6 +260,8 @@ async function saveToTaughtDictionary(englishWord, tuluWord, userInfo = null) {
     if (!mongoAvailable || !db) {
         console.log(`💾 Memory save: "${englishWord}" = "${tuluWord}"`);
         taughtWordsCache[englishWord.toLowerCase().trim()] = tuluWord.trim(); // Update local cache
+        // Ensure runtime lookup used by handlers is also updated
+        learnedWords[englishWord.toLowerCase().trim()] = tuluWord.trim();
         return true;
     }
 
@@ -283,11 +305,18 @@ async function saveToTaughtDictionary(englishWord, tuluWord, userInfo = null) {
 
 // Save API result to cache
 async function saveToAPICache(englishWord, translation, apiSource) {
-    if (!mongoAvailable || !db) return;
+    const key = englishWord.toLowerCase().trim();
+
+    if (!mongoAvailable || !db) {
+        // Memory-mode: store in in-process apiCache
+        apiCache[key] = { translation: translation.trim(), source: apiSource, createdAt: Date.now() };
+        console.log(`🌐 (memory) API Cache: "${englishWord}" = "${translation}" (${apiSource})`);
+        return;
+    }
 
     try {
         const doc = {
-            english: englishWord.toLowerCase().trim(),
+            english: key,
             translation: translation.trim(),
             api_source: apiSource,
             createdAt: new Date(),
@@ -328,11 +357,20 @@ async function loadFromTaughtDictionary() {
 
 // Load from API Cache
 async function loadFromAPICache(englishWord) {
-    if (!mongoAvailable || !db) return null;
+    const key = englishWord.toLowerCase().trim();
+
+    if (!mongoAvailable || !db) {
+        const mem = apiCache[key];
+        if (mem) {
+            console.log(`🌐 (memory) Cache hit: "${englishWord}" = "${mem.translation}"`);
+            return { translation: mem.translation, source: mem.source || 'memory' };
+        }
+        return null;
+    }
 
     try {
         const cached = await db.collection('api_cache').findOne({ 
-            english: englishWord.toLowerCase().trim() 
+            english: key
         });
         
         if (cached) {
@@ -376,7 +414,10 @@ async function getTaughtDictionaryStats() {
 }
 
 async function getAPICacheStats() {
-    if (!mongoAvailable || !db) return { count: 0 };
+    if (!mongoAvailable || !db) {
+        // Return in-memory apiCache count when DB unavailable
+        return { count: Object.keys(apiCache).length };
+    }
 
     try {
         const count = await db.collection('api_cache').countDocuments();
@@ -1027,64 +1068,107 @@ Please try again: Ask me "${userState.originalText}" and provide the authentic T
                 }
                 return;
             }
+
+            if (userState.mode === 'correcting') {
+    // User correcting taught dictionary entry
+    const oldTranslation = userState.oldTranslation;
+    const correctorInfo = `${userName} (Corrector)`;
+    const success = await learnNewWord(userState.englishWord, userText, userId, correctorInfo);
+    
+    if (success) {
+        // Force cache refresh for immediate effect
+        lastCacheUpdate = 0;
+        await getCachedTaughtWords();
+        
+        const correctionMessage = `✅ **Dictionary Updated Successfully!**
+
+📝 **English:** ${userState.originalText}
+❌ **Previous:** ${oldTranslation}  
+✅ **Your Correction:** ${userText}
+👤 **Corrected by:** ${userName}
+
+🗄️ **Collection:** taught_dictionary updated
+💾 **Cache:** Immediately refreshed
+🌍 **Effect:** All users see your correction
+
+**Verify:** Ask me "${userState.originalText}" for confirmation`;
+
+        await bot.sendMessage(msg.chat.id, correctionMessage, {parse_mode: 'Markdown'});
+    } else {
+        await bot.sendMessage(msg.chat.id, `❌ **Correction failed**
+
+Please try: **/correct ${userState.originalText}** again`);
+        delete userStates[userId];
+    }
+    return;
+}
         }
         
         // Normal translation request with enhanced authentic strategy
         const englishPattern = /^[a-zA-Z0-9\s.,!?'"-]+$/;
         
         if (englishPattern.test(userText)) {
-            bot.sendChatAction(msg.chat.id, 'typing');
-            
-            const result = await translateToTulu(userText, userId);
-            
-            if (result.found) {
-                const tierEmoji = {
-                    1: '🏆', // Base dictionary
-                    2: '🎯', // Taught dictionary 
-                    3: '💾', // API cache
-                    4: '🌐', // Fresh Tulu API
-                    5: '❓'  // Unknown
-                }[result.tier] || '✅';
-                
-                const priority = {
-                    1: 'Highest (<1ms)', 
-                    2: 'High (<5ms Cached)', 
-                    3: 'Good (<50ms)',
-                    4: 'Medium (Tulu API)', 
-                    5: 'Learning'
-                }[result.tier] || 'Standard';
-                
-                let responseMessage = `${tierEmoji} **Authentic Tulu Translation Found**
+    bot.sendChatAction(msg.chat.id, 'typing');
+    
+    const result = await translateToTulu(userText, userId);
+    
+    if (result.found) {
+        const tierEmoji = {
+            1: '🏆', // Base dictionary
+            2: '🎯', // Taught dictionary 
+            3: '💾', // API cache
+            4: '🌐', // Fresh Tulu API
+            5: '❓'  // Unknown
+        }[result.tier] || '✅';
+        
+        const priority = {
+            1: 'Highest (<1ms)', 
+            2: 'High (<5ms Cached)', 
+            3: 'Good (<50ms)',
+            4: 'Medium (Tulu API)', 
+            5: 'Learning'
+        }[result.tier] || 'Standard';
+        
+        // ✅ FIXED: Declare base message first
+        let responseMessage = `${tierEmoji} **Authentic Tulu Translation Found**
 
 📝 **English:** ${userText}
 🏛️ **Translation:** ${result.translation}
 
 📊 **Source:** ${result.source}
+⭐ **Performance:** ${priority}
+🗄️ **Database:** ${mongoAvailable ? 'Enhanced MongoDB Collections (Optimized)' : 'Memory + Tulu API'}`;
+
+        // ✅ FIXED: Now add tier-specific content with proper if-else
+        if (result.tier === 4 && result.needsVerification) {
+            responseMessage += `
 
 🌐 **Google Translate Tulu API Result:**
+• Used authentic Tulu language code (tcy)
+• May be approximate translation
 • **Improve it:** **/correct ${userText.toLowerCase()}**
 • Your correction provides authentic Tulu for everyone`;
-                } else if (result.tier === 3) {
-                    responseMessage += `
+        } else if (result.tier === 3) {
+            responseMessage += `
 
 💾 **Previously Cached API Result:**
 • From earlier Google Translate (tcy) attempt
 • **Improve it:** **/correct ${userText.toLowerCase()}** with authentic Tulu`;
-                } else if (result.tier === 2) {
-                    responseMessage += `
+        } else if (result.tier === 2) {
+            responseMessage += `
 
 🎯 **Authentic User-Taught Translation:**
 • Retrieved from 5-minute smart cache
 • Contributed by community member
 • Authentic and verified by native speaker
 • **Improve it:** **/correct ${userText.toLowerCase()}** if needed`;
-                } else {
-                    responseMessage += `
+        } else {
+            responseMessage += `
 
 💡 **Perfect!** Use **/correct ${userText.toLowerCase()}** to add community improvements`;
-                }
+        }
 
-                responseMessage += `
+        responseMessage += `
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`;
@@ -1164,9 +1248,6 @@ Reply with the correct **authentic Tulu** translation (Roman letters)
         }
 });
 
-// Add all other bot commands (stats, learned, correct, skip, numbers) here...
-// [Previous command implementations remain the same]
-
 // Error handling
 bot.on('error', (error) => {
     console.error('🚨 Bot error:', error);
@@ -1185,6 +1266,33 @@ process.on('SIGTERM', async () => {
     }
     bot.stopPolling();
     process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+    console.log('📴 SIGINT received - shutting down gracefully...');
+    try {
+        if (client && mongoAvailable) {
+            await client.close();
+            console.log('🗄️ MongoDB connection closed');
+        }
+        if (botStarted) {
+            await bot.stopPolling();
+            console.log('🧹 Bot polling stopped');
+        }
+    } catch (e) {
+        console.error('Error during shutdown:', e.message);
+    } finally {
+        process.exit(0);
+    }
+});
+
+process.on('unhandledRejection', (reason, p) => {
+    console.error('🚨 Unhandled Rejection at:', p, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('🚨 Uncaught Exception:', err);
+    process.exit(1);
 });
 
 // Start health server
