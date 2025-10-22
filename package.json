@@ -1,12 +1,12 @@
 {
-  "name": "production-tulu-translator",
-  "version": "4.0.0",
-  "description": "Complete Production Tulu Translator with Shared Database and API Integration",
+  "name": "enhanced-tulu-translator",
+  "version": "5.0.0",
+  "description": "Enhanced Tulu Translator with Separate Collections and Full Attribution System",
   "main": "cloud-bot.js",
   "scripts": {
     "start": "node cloud-bot.js"
   },
-  "keywords": ["telegram", "bot", "tulu", "translator", "mongodb", "production", "api"],
+  "keywords": ["telegram", "bot", "tulu", "translator", "mongodb", "enhanced", "collections"],
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {

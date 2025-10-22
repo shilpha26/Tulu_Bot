@@ -19,15 +19,20 @@ let client;
 let db;
 let mongoAvailable = false;
 
-const bot = new TelegramBot(token, {polling: true});
+const bot = new TelegramBot(token, {
+    polling: {
+        interval: 300,
+        autoStart: false
+    }
+});
 
-console.log('🚀 Complete Production Tulu Bot Starting...\n');
+console.log('🚀 Enhanced Tulu Bot with Separate Collections Starting...\n');
 
 // Enhanced Keep-Alive System with Wake-on-Start
 let keepAliveInterval = null;
 let lastActivityTime = null;
-const KEEP_ALIVE_DURATION = 45 * 60 * 1000; // 45 minutes (longer than Render's 15min sleep)
-const PING_INTERVAL = 12 * 60 * 1000; // 12 minutes (before 15min sleep)
+const KEEP_ALIVE_DURATION = 45 * 60 * 1000; // 45 minutes
+const PING_INTERVAL = 12 * 60 * 1000; // 12 minutes
 
 function startKeepAlive() {
     if (keepAliveInterval) {
@@ -35,7 +40,7 @@ function startKeepAlive() {
     }
     
     lastActivityTime = Date.now();
-    console.log('🏓 Starting enhanced keep-alive session for 45 minutes');
+    console.log('🏓 Starting keep-alive session for 45 minutes');
     
     keepAliveInterval = setInterval(async () => {
         const now = Date.now();
@@ -80,7 +85,6 @@ function wakeUpService() {
     console.log('⚡ Service wake-up triggered');
     extendKeepAlive();
     
-    // Immediate health check to ensure responsiveness
     setTimeout(async () => {
         try {
             const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -92,15 +96,15 @@ function wakeUpService() {
     }, 1000);
 }
 
-// Enhanced MongoDB initialization
+// Enhanced MongoDB initialization with separate collections
 async function initializeMongoDB() {
     if (!mongoUri) {
-        console.log('⚠️ No MongoDB URI - using memory storage with API fallback');
+        console.log('⚠️ No MongoDB URI - using memory storage');
         return false;
     }
 
     try {
-        console.log('🔧 Connecting to MongoDB Atlas (Shared Database)...');
+        console.log('🔧 Connecting to MongoDB Atlas (Enhanced Collections)...');
         
         client = new MongoClient(mongoUri, {
             tls: true,
@@ -116,7 +120,7 @@ async function initializeMongoDB() {
         });
         
         await client.connect();
-        db = client.db('shared_tulu_dictionary');
+        db = client.db('tulu_translator');
         
         // Test connection with retry
         let connected = false;
@@ -133,21 +137,33 @@ async function initializeMongoDB() {
         
         if (!connected) throw new Error('Failed to establish stable connection');
         
-        console.log('✅ Connected to MongoDB Atlas - Shared Database Active');
+        console.log('✅ Connected to MongoDB Atlas - Enhanced Database Active');
         
-        // Create collections and indexes
+        // Create separate collections with comprehensive indexes
         try {
-            await db.collection('community_words').createIndex({ english: 1 }, { unique: true });
-            await db.collection('community_words').createIndex({ updatedAt: -1 });
-            console.log('✅ Shared database collections indexed');
+            // Taught Dictionary Collection (User-contributed authentic Tulu)
+            await db.collection('taught_dictionary').createIndex({ english: 1 }, { unique: true });
+            await db.collection('taught_dictionary').createIndex({ updatedAt: -1 });
+            await db.collection('taught_dictionary').createIndex({ contributor: 1 });
+            await db.collection('taught_dictionary').createIndex({ usage_count: -1 });
+            
+            // API Cache Collection (API results for performance)
+            await db.collection('api_cache').createIndex({ english: 1 }, { unique: true });
+            await db.collection('api_cache').createIndex({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 }); // 7 days TTL
+            await db.collection('api_cache').createIndex({ api_source: 1 });
+            
+            console.log('✅ Enhanced collections created with comprehensive indexes');
         } catch (indexError) {
             if (indexError.code !== 85) {
                 console.log('⚠️ Index creation warning:', indexError.message);
             }
         }
         
-        const wordCount = await db.collection('community_words').countDocuments();
-        console.log(`📚 Shared database loaded with ${wordCount} community words`);
+        const taughtCount = await db.collection('taught_dictionary').countDocuments();
+        const cacheCount = await db.collection('api_cache').countDocuments();
+        
+        console.log(`📚 Taught Dictionary: ${taughtCount} user-contributed words`);
+        console.log(`🌐 API Cache: ${cacheCount} cached translations`);
         
         return true;
     } catch (error) {
@@ -157,15 +173,15 @@ async function initializeMongoDB() {
     }
 }
 
-// Enhanced translation API with better Tulu support
+// Enhanced API translation with multiple accurate sources
 async function tryAPITranslation(text) {
+    // Skip API for very short words or numbers (already in base dictionary)
     if (text.length <= 2 || /^\d+$/.test(text)) return null;
     
-    // Try multiple translation approaches
     const translationMethods = [
-        // Method 1: Google Translate via unofficial API
+        // Method 1: Google Translate to Hindi (most accurate for Indian languages)
         async () => {
-            const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tcy&dt=t&q=${encodeURIComponent(text)}`;
+            const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=hi&dt=t&q=${encodeURIComponent(text)}`;
             const response = await fetch(url, {
                 headers: { 
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -179,18 +195,21 @@ async function tryAPITranslation(text) {
             if (result && result[0] && result[0][0] && result[0][0][0]) {
                 const translation = result[0][0][0].trim();
                 
-                if (translation.length > 2 && 
+                // Quality validation
+                if (translation.length > 1 && 
                     translation !== text.toLowerCase() && 
-                    !translation.includes('undefined')) {
-                    return translation;
+                    !translation.includes('undefined') &&
+                    !translation.includes('INVALID') &&
+                    !translation.includes('ERROR')) {
+                    return { translation, source: 'Google Translate (Hindi)' };
                 }
             }
             return null;
         },
         
-        // Method 2: Alternative API endpoint
+        // Method 2: MyMemory Translator (backup)
         async () => {
-            const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|tcy`;
+            const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|hi`;
             const response = await fetch(url, { timeout: 8000 });
             
             if (!response.ok) return null;
@@ -198,25 +217,49 @@ async function tryAPITranslation(text) {
             const result = await response.json();
             if (result && result.responseData && result.responseData.translatedText) {
                 const translation = result.responseData.translatedText.trim();
-                if (translation !== text && translation !== "NO QUERY SPECIFIED. EXAMPLE: GET?Q=HELLO&LANGPAIR=EN|IT") {
-                    return translation;
+                if (translation !== text && 
+                    translation !== "NO QUERY SPECIFIED. EXAMPLE: GET?Q=HELLO&LANGPAIR=EN|IT" &&
+                    !translation.includes('INVALID')) {
+                    return { translation, source: 'MyMemory Translator' };
+                }
+            }
+            return null;
+        },
+        
+        // Method 3: Google Translate to Kannada (similar to Tulu)
+        async () => {
+            const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=kn&dt=t&q=${encodeURIComponent(text)}`;
+            const response = await fetch(url, {
+                headers: { 
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
+                timeout: 8000
+            });
+            
+            if (!response.ok) return null;
+            
+            const result = await response.json();
+            if (result && result[0] && result[0][0] && result[0][0][0]) {
+                const translation = result[0][0][0].trim();
+                if (translation.length > 1 && translation !== text.toLowerCase()) {
+                    return { translation: `${translation}`, source: 'Google Translate (Kannada)' };
                 }
             }
             return null;
         }
     ];
     
-    // Try each method with timeout
+    // Try each method sequentially
     for (let i = 0; i < translationMethods.length; i++) {
         try {
-            console.log(`🌐 Trying translation API method ${i + 1} for: "${text}"`);
+            console.log(`🌐 Trying API method ${i + 1} for: "${text}"`);
             const result = await Promise.race([
                 translationMethods[i](),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000))
             ]);
             
             if (result) {
-                console.log(`✅ API translation found: "${result}"`);
+                console.log(`✅ API success (${result.source}): "${result.translation}"`);
                 return result;
             }
         } catch (error) {
@@ -224,11 +267,12 @@ async function tryAPITranslation(text) {
         }
     }
     
+    console.log('🚫 All API methods failed');
     return null;
 }
 
-// Enhanced database operations for shared dictionary
-async function saveWordToSharedDB(englishWord, tuluWord, userInfo = null) {
+// Save to Taught Dictionary (User contributions)
+async function saveToTaughtDictionary(englishWord, tuluWord, userInfo = null) {
     if (!mongoAvailable || !db) {
         console.log(`💾 Memory save: "${englishWord}" = "${tuluWord}"`);
         return true;
@@ -238,134 +282,195 @@ async function saveWordToSharedDB(englishWord, tuluWord, userInfo = null) {
         const doc = {
             english: englishWord.toLowerCase().trim(),
             tulu: tuluWord.trim(),
+            contributor: userInfo || 'Anonymous',
             createdAt: new Date(),
             updatedAt: new Date(),
-            contributedBy: userInfo || 'Anonymous',
             verified: false,
+            source: 'user_taught',
+            votes: 0,
             usage_count: 1
         };
         
-        // Check if word exists to update usage count
-        const existing = await db.collection('community_words').findOne({ english: doc.english });
+        // Check if word exists to preserve metadata
+        const existing = await db.collection('taught_dictionary').findOne({ english: doc.english });
         if (existing) {
+            doc.createdAt = existing.createdAt;
             doc.usage_count = (existing.usage_count || 0) + 1;
-            doc.createdAt = existing.createdAt; // Preserve original creation time
+            doc.votes = existing.votes || 0;
         }
         
-        await db.collection('community_words').replaceOne(
+        await db.collection('taught_dictionary').replaceOne(
             { english: doc.english },
             doc,
             { upsert: true }
         );
         
-        console.log(`💾 Shared DB save: "${englishWord}" = "${tuluWord}" (${existing ? 'updated' : 'new'})`);
+        console.log(`📚 Taught Dictionary: "${englishWord}" = "${tuluWord}" by ${userInfo || 'Anonymous'}`);
         return true;
     } catch (error) {
-        console.error('❌ Shared DB save failed:', error.message);
+        console.error('❌ Taught Dictionary save failed:', error.message);
         return false;
     }
 }
 
-async function loadWordsFromSharedDB() {
+// Save API result to cache
+async function saveToAPICache(englishWord, translation, apiSource) {
+    if (!mongoAvailable || !db) return;
+
+    try {
+        const doc = {
+            english: englishWord.toLowerCase().trim(),
+            translation: translation.trim(),
+            api_source: apiSource,
+            createdAt: new Date(),
+            source: 'api_cache'
+        };
+        
+        await db.collection('api_cache').replaceOne(
+            { english: doc.english },
+            doc,
+            { upsert: true }
+        );
+        
+        console.log(`🌐 API Cache: "${englishWord}" = "${translation}" (${apiSource})`);
+    } catch (error) {
+        console.error('❌ API Cache save failed:', error.message);
+    }
+}
+
+// Load from Taught Dictionary
+async function loadFromTaughtDictionary() {
     if (!mongoAvailable || !db) return {};
 
     try {
         const words = {};
-        const cursor = db.collection('community_words').find({});
+        const cursor = db.collection('taught_dictionary').find({});
         
         await cursor.forEach(doc => {
             words[doc.english] = doc.tulu;
         });
         
-        console.log(`📖 Loaded ${Object.keys(words).length} words from shared database`);
+        console.log(`📖 Loaded ${Object.keys(words).length} user-taught words`);
         return words;
     } catch (error) {
-        console.error('❌ Shared DB load failed:', error.message);
+        console.error('❌ Taught Dictionary load failed:', error.message);
         return {};
     }
 }
 
-async function getSharedDBWordCount() {
-    if (!mongoAvailable || !db) return Object.keys(learnedWords).length;
+// Load from API Cache
+async function loadFromAPICache(englishWord) {
+    if (!mongoAvailable || !db) return null;
 
     try {
-        return await db.collection('community_words').countDocuments();
+        const cached = await db.collection('api_cache').findOne({ 
+            english: englishWord.toLowerCase().trim() 
+        });
+        
+        if (cached) {
+            console.log(`🌐 Cache hit: "${englishWord}" = "${cached.translation}"`);
+            return { translation: cached.translation, source: cached.api_source };
+        }
+        return null;
     } catch (error) {
-        return Object.keys(learnedWords).length;
+        console.error('❌ API Cache load failed:', error.message);
+        return null;
     }
 }
 
-async function getRecentWordsFromSharedDB(limit = 5) {
-    if (!mongoAvailable || !db) {
-        return Object.entries(learnedWords)
-            .slice(-limit)
-            .map(([english, tulu]) => ({ english, tulu }));
-    }
+// Get comprehensive statistics
+async function getTaughtDictionaryStats() {
+    if (!mongoAvailable || !db) return { count: Object.keys(learnedWords).length, recent: [] };
 
     try {
-        const cursor = db.collection('community_words')
+        const count = await db.collection('taught_dictionary').countDocuments();
+        
+        const recentCursor = db.collection('taught_dictionary')
             .find({})
             .sort({ updatedAt: -1 })
-            .limit(limit);
+            .limit(5);
         
-        const recentWords = [];
-        await cursor.forEach(doc => {
-            recentWords.push({ 
+        const recent = [];
+        await recentCursor.forEach(doc => {
+            recent.push({ 
                 english: doc.english, 
                 tulu: doc.tulu,
-                contributedBy: doc.contributedBy || 'Anonymous'
+                contributor: doc.contributor || 'Anonymous',
+                updatedAt: doc.updatedAt,
+                usage_count: doc.usage_count || 1
             });
         });
         
-        return recentWords;
+        return { count, recent };
     } catch (error) {
-        return [];
+        return { count: 0, recent: [] };
     }
 }
 
-// Enhanced health check server with wake-on-start
+async function getAPICacheStats() {
+    if (!mongoAvailable || !db) return { count: 0 };
+
+    try {
+        const count = await db.collection('api_cache').countDocuments();
+        return { count };
+    } catch (error) {
+        return { count: 0 };
+    }
+}
+
+// Enhanced health check server
 const app = express();
 
 app.get('/', async (req, res) => {
     const isKeepAliveActive = keepAliveInterval !== null;
     const timeSinceActivity = lastActivityTime ? Date.now() - lastActivityTime : null;
-    let dbWordCount = 0;
-    let recentWords = [];
+    let taughtStats = { count: 0, recent: [] };
+    let cacheStats = { count: 0 };
     
     try {
-        dbWordCount = await getSharedDBWordCount();
-        recentWords = await getRecentWordsFromSharedDB(3);
+        taughtStats = await getTaughtDictionaryStats();
+        cacheStats = await getAPICacheStats();
     } catch (error) {
         // Handle gracefully
     }
     
     const stats = {
         status: 'running',
-        bot: 'Complete Production Tulu Translator',
-        version: '4.0.0',
+        bot: 'Enhanced Tulu Translator with Separate Collections',
+        version: '5.0.0',
         uptime: Math.floor(process.uptime() / 60) + ' minutes',
-        shared_dictionary_words: dbWordCount,
-        base_dictionary_words: Object.keys(tuluDictionary).length,
-        total_vocabulary: Object.keys(tuluDictionary).length + dbWordCount,
-        recent_contributions: recentWords,
+        database_structure: {
+            taught_dictionary: taughtStats.count,
+            api_cache: cacheStats.count,
+            base_dictionary: Object.keys(tuluDictionary).length
+        },
+        total_vocabulary: Object.keys(tuluDictionary).length + taughtStats.count,
+        recent_contributions: taughtStats.recent,
         keep_alive_active: isKeepAliveActive,
         minutes_since_activity: timeSinceActivity ? Math.floor(timeSinceActivity / (60 * 1000)) : null,
         database: {
-            type: mongoAvailable ? 'MongoDB Atlas - Shared Database' : 'Memory Storage + API',
+            type: mongoAvailable ? 'MongoDB Atlas - Enhanced Collections' : 'Memory Storage + API',
             status: mongoAvailable ? 'Connected' : 'Fallback Mode',
+            collections: mongoAvailable ? ['taught_dictionary', 'api_cache'] : ['memory'],
             persistent: mongoAvailable,
             shared_across_users: mongoAvailable
         },
         features: [
+            'Separate Collections (taught_dictionary, api_cache)',
             'Wake-on-Start (No 15min Downtime)',
-            'Shared Community Dictionary', 
-            'Multi-API Translation Fallback',
+            'Multi-API Translation System', 
             'Enhanced Keep-Alive (45min)',
-            'Word Correction System',
-            'Usage Analytics',
-            'Clean User Interface'
+            'User Attribution System',
+            'Performance Caching',
+            'Comprehensive Statistics'
         ],
-        api_status: 'Google Translate + MyMemory APIs',
+        translation_priority: [
+            '1. Base Dictionary (Verified)',
+            '2. Taught Dictionary (User Authentic)',
+            '3. API Cache (Performance)',
+            '4. Fresh API (Google/MyMemory)',
+            '5. User Teaching (Community Building)'
+        ],
         timestamp: new Date().toISOString()
     };
     res.json(stats);
@@ -375,17 +480,18 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy', 
         keep_alive: keepAliveInterval !== null,
-        database: mongoAvailable ? 'Shared MongoDB Connected' : 'Memory + API Active',
+        database: mongoAvailable ? 'Enhanced MongoDB Collections Connected' : 'Memory + API Active',
         wake_responsive: true,
+        collections: mongoAvailable ? ['taught_dictionary', 'api_cache'] : ['memory'],
         timestamp: new Date().toISOString() 
     });
 });
 
-// Shared dictionary and user states
+// In-memory cache and user states
 let learnedWords = {};
 const userStates = {};
 
-// Enhanced base dictionary with Roman Tulu
+// Comprehensive base dictionary with Roman Tulu
 const tuluDictionary = {
     // Greetings
     'hello': 'namaskara', 'hi': 'namaskara', 'hey': 'namaskara',
@@ -456,40 +562,57 @@ function getCombinedDictionary() {
     return { ...tuluDictionary, ...learnedWords };
 }
 
-// Enhanced translation with 4-tier system
+// Enhanced 5-tier translation system with separate collections
 async function translateToTulu(text, userId) {
     const lowerText = text.toLowerCase().trim();
-    const fullDictionary = getCombinedDictionary();
     
-    // Tier 1: Base dictionary (highest priority)
+    // Tier 1: Base dictionary (highest priority - verified Tulu)
     if (tuluDictionary[lowerText]) {
         const translation = tuluDictionary[lowerText];
         console.log(`✅ Base dictionary: "${translation}"`);
-        return { translation, found: true, source: 'Base Dictionary', tier: 1 };
+        return { translation, found: true, source: 'Verified Base Dictionary', tier: 1 };
     }
     
-    // Tier 2: Community shared database (second priority)
-    if (learnedWords[lowerText]) {
-        const translation = learnedWords[lowerText];
-        console.log(`✅ Shared database: "${translation}"`);
-        return { translation, found: true, source: 'Shared Community Database', tier: 2 };
+    // Tier 2: Taught Dictionary (second priority - user-taught authentic Tulu)
+    const taughtWords = await loadFromTaughtDictionary();
+    if (taughtWords[lowerText]) {
+        const translation = taughtWords[lowerText];
+        console.log(`✅ Taught dictionary: "${translation}"`);
+        return { translation, found: true, source: 'User-Taught Dictionary', tier: 2 };
     }
     
-    // Tier 3: API translation (third priority)
-    console.log(`🔍 Checking APIs for: "${text}"`);
-    const apiResult = await tryAPITranslation(text);
-    if (apiResult) {
-        console.log(`🌐 API translation: "${apiResult}"`);
-        return {
-            translation: apiResult,
-            found: true,
-            source: 'Translation API (Please verify accuracy)',
-            tier: 3
+    // Tier 3: API Cache (check if we already translated this)
+    const cachedResult = await loadFromAPICache(lowerText);
+    if (cachedResult) {
+        console.log(`✅ API cache hit: "${cachedResult.translation}"`);
+        return { 
+            translation: cachedResult.translation, 
+            found: true, 
+            source: `${cachedResult.source} (Cached)`, 
+            tier: 3,
+            needsVerification: true 
         };
     }
     
-    // Tier 4: Ask user to contribute (last resort)
-    console.log(`❓ No translation found for: "${text}"`);
+    // Tier 4: Fresh API translation
+    console.log(`🔍 Checking APIs for: "${text}"`);
+    const apiResult = await tryAPITranslation(text);
+    if (apiResult) {
+        // Save to cache for future use
+        await saveToAPICache(lowerText, apiResult.translation, apiResult.source);
+        
+        console.log(`🌐 Fresh API translation: "${apiResult.translation}"`);
+        return {
+            translation: apiResult.translation,
+            found: true,
+            source: `${apiResult.source} (Fresh)`,
+            tier: 4,
+            needsVerification: true
+        };
+    }
+    
+    // Tier 5: Ask user to teach (last resort)
+    console.log(`❓ No translation found anywhere for: "${text}"`);
     userStates[userId] = {
         mode: 'learning',
         englishWord: lowerText,
@@ -497,23 +620,29 @@ async function translateToTulu(text, userId) {
         timestamp: Date.now()
     };
     
-    return { translation: null, found: false, source: 'unknown', tier: 4 };
+    return { translation: null, found: false, source: 'needs_teaching', tier: 5 };
 }
 
+// Enhanced learning function for taught dictionary
 async function learnNewWord(englishWord, tuluTranslation, userId, userInfo = null) {
     const lowerEnglish = englishWord.toLowerCase().trim();
     const tuluWord = tuluTranslation.trim();
     
-    // Save to shared database
-    const saved = await saveWordToSharedDB(lowerEnglish, tuluWord, userInfo);
+    // Validate input
+    if (tuluWord.length < 2) {
+        console.log(`❌ Invalid translation too short: "${tuluWord}"`);
+        return false;
+    }
+    
+    // Save to taught dictionary
+    const saved = await saveToTaughtDictionary(lowerEnglish, tuluWord, userInfo);
     
     if (saved) {
         // Update local cache
         learnedWords[lowerEnglish] = tuluWord;
         delete userStates[userId];
         
-        const storageType = mongoAvailable ? 'Shared Database' : 'Memory';
-        console.log(`📚 Learned: "${lowerEnglish}" = "${tuluWord}" (${storageType})`);
+        console.log(`📚 User taught: "${lowerEnglish}" = "${tuluWord}"`);
         return true;
     }
     
@@ -528,55 +657,97 @@ function clearUserState(userId) {
     return false;
 }
 
+// Enhanced bot startup with conflict prevention
+let botStarted = false;
+
+async function startBotSafely() {
+    if (botStarted) {
+        console.log('⚠️ Bot already started - preventing duplicate instance');
+        return;
+    }
+    
+    try {
+        console.log('🤖 Starting bot with conflict prevention...');
+        
+        // Clear any existing webhooks that might conflict
+        await bot.deleteWebHook();
+        console.log('🧹 Cleared any existing webhooks');
+        
+        // Start polling with delay to avoid conflicts
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await bot.startPolling();
+        
+        botStarted = true;
+        console.log('✅ Bot polling started successfully');
+        
+        // Test bot connection
+        const botInfo = await bot.getMe();
+        console.log(`🤖 Bot confirmed: @${botInfo.username}`);
+        
+    } catch (error) {
+        console.error('❌ Bot startup failed:', error.message);
+        
+        if (error.message.includes('409') || error.message.includes('Conflict')) {
+            console.log('🔄 Conflict detected - retrying in 10 seconds...');
+            setTimeout(() => {
+                botStarted = false;
+                startBotSafely();
+            }, 10000);
+        } else {
+            throw error;
+        }
+    }
+}
+
 // Enhanced bot commands
 
 // Wake-on-Start /start command
 bot.onText(/\/start/, async (msg) => {
-    // Immediate wake-up response
     wakeUpService();
     
-    const dbWordCount = await getSharedDBWordCount();
-    const totalWords = Object.keys(tuluDictionary).length + dbWordCount;
+    const taughtStats = await getTaughtDictionaryStats();
+    const cacheStats = await getAPICacheStats();
+    const totalWords = Object.keys(tuluDictionary).length + taughtStats.count;
     
     clearUserState(msg.from.id);
     
-    const welcomeMessage = `🌟 **Production Tulu Translator Bot**
+    const welcomeMessage = `🌟 **Enhanced Tulu Translator Bot**
 
 ⚡ **Instant Wake-Up** - No 15-minute delays!
-🗄️ **Shared Database** - All users contribute together
-🌐 **Smart Translation** - Multiple APIs + Community
+🗄️ **Separate Collections** - Organized database structure
+🌐 **Multi-API System** - Google + MyMemory + Cache
 
-📊 **Live Statistics:**
-• **Base Dictionary:** ${Object.keys(tuluDictionary).length} words
-• **Community Shared:** ${dbWordCount} words  
-• **Total Vocabulary:** ${totalWords} words
-• **Always Learning:** Users teaching authentic Tulu
+📊 **Live Database Statistics:**
+• **🏆 Base Dictionary:** ${Object.keys(tuluDictionary).length} verified words
+• **📚 Taught Dictionary:** ${taughtStats.count} user contributions  
+• **🌐 API Cache:** ${cacheStats.count} cached translations
+• **🎯 Total Vocabulary:** ${totalWords}+ words
 
-🎯 **Translation Priorities:**
-1️⃣ **Base Dictionary** (Verified Tulu)
-2️⃣ **Community Database** (User contributions)  
-3️⃣ **Translation APIs** (Auto-translated)
-4️⃣ **Learn from You** (Teach authentic Tulu)
+🎯 **Smart Translation Priority:**
+1️⃣ **Base Dictionary** → Instant verified Tulu
+2️⃣ **User-Taught** → Authentic community contributions
+3️⃣ **API Cache** → Fast cached results
+4️⃣ **Fresh API** → Google/MyMemory translation
+5️⃣ **Community Teaching** → You help build the database
 
-💡 **Try These Commands:**
+💡 **Commands:**
 • Just type any English word or phrase
-• **/correct <word>** - Fix translations in shared database
-• **/stats** - See detailed bot statistics
-• **/learned** - Browse community contributions
+• **/correct <word>** - Fix taught dictionary entries
+• **/stats** - Detailed database statistics
+• **/learned** - Browse user contributions
 • **/numbers** - Complete Tulu number system
 
-🎯 **Example Translations:**
+🎯 **Try These:**
 • "Hello" → namaskara
 • "Thank you" → dhanyavada  
-• "How are you" → yenkulu ullar
-• "I love you" → (teach me authentic Tulu!)
+• "I love you" → (teach us authentic Tulu!)
 
-🚀 **Ready to translate and learn together!**`;
+🚀 **Building the largest authentic Tulu database together!**`;
 
     await bot.sendMessage(msg.chat.id, welcomeMessage, {parse_mode: 'Markdown'});
 });
 
-// Enhanced /correct command
+// Enhanced /correct command for taught dictionary
 bot.onText(/\/correct (.+)/, async (msg, match) => {
     extendKeepAlive();
     
@@ -584,12 +755,9 @@ bot.onText(/\/correct (.+)/, async (msg, match) => {
     const userName = msg.from.first_name || 'User';
     const wordToCorrect = match[1].toLowerCase().trim();
     
-    // Reload from shared database
-    if (mongoAvailable) {
-        learnedWords = await loadWordsFromSharedDB();
-    }
-    
-    const fullDictionary = getCombinedDictionary();
+    // Reload from taught dictionary
+    const taughtWords = await loadFromTaughtDictionary();
+    const fullDictionary = { ...tuluDictionary, ...taughtWords };
     
     if (fullDictionary[wordToCorrect]) {
         const currentTranslation = fullDictionary[wordToCorrect];
@@ -600,20 +768,20 @@ bot.onText(/\/correct (.+)/, async (msg, match) => {
 
 📝 **Word:** "${wordToCorrect}"
 🔒 **Current:** "${currentTranslation}"
-📚 **Source:** Built-in base dictionary
+📚 **Source:** Built-in verified dictionary
 
 **Why can't I correct this?**
-This word is part of our verified base dictionary. However, you can:
+Base dictionary words are verified Tulu. However, you can:
 
-1️⃣ **Add a variation:** Ask me to translate "${wordToCorrect} variation" 
-2️⃣ **Suggest improvement:** Contact the bot developer
-3️⃣ **Teach regional version:** Use a slightly different phrase
+1️⃣ **Add variation:** Ask me to translate "${wordToCorrect} alternative" 
+2️⃣ **Teach regional version:** Use slightly different phrasing
+3️⃣ **Contribute new words:** Help expand the taught dictionary
 
-💡 **Example:** Instead of correcting "hello", teach me "hello friend" or "good hello"`, {parse_mode: 'Markdown'});
+💡 **Focus on teaching new authentic Tulu words!**`, {parse_mode: 'Markdown'});
             return;
         }
         
-        // Set up correction mode for community words
+        // Set up correction mode for taught dictionary words
         userStates[userId] = {
             mode: 'correcting',
             englishWord: wordToCorrect,
@@ -623,22 +791,23 @@ This word is part of our verified base dictionary. However, you can:
             timestamp: Date.now()
         };
         
-        await bot.sendMessage(msg.chat.id, `🔧 **Correction Mode Active**
+        await bot.sendMessage(msg.chat.id, `🔧 **Taught Dictionary Correction Mode**
 
 📝 **English:** "${wordToCorrect}"
 🔄 **Current Translation:** "${currentTranslation}"
-🗄️ **Source:** Shared community database
+🗄️ **Source:** User-taught dictionary collection
 
-✏️ **Please send the correct Tulu translation:**
+✏️ **Send the correct Tulu translation:**
 
-**What happens next:**
-• Your correction updates the shared database
-• All users will see the improved translation
-• Previous version is replaced with your correction
+**What happens:**
+• Updates **taught_dictionary** collection in MongoDB
+• Your correction gets user attribution
+• All users see the improved translation
+• Original contributor info preserved
 
 **Commands:**
 • **/skip** - Cancel this correction
-• Just type the correct translation to proceed
+• Type correct translation to proceed
 
 ⏰ **Correction expires in 10 minutes**`, {parse_mode: 'Markdown'});
         
@@ -649,138 +818,150 @@ This word is part of our verified base dictionary. However, you can:
                 delete userStates[userId];
                 bot.sendMessage(msg.chat.id, `⏰ **Correction expired for "${wordToCorrect}"**
 
-You can start a new correction anytime with:
+You can start a new correction anytime:
 **/correct ${wordToCorrect}**`).catch(() => {});
             }
         }, 10 * 60 * 1000);
         
     } else {
-        await bot.sendMessage(msg.chat.id, `❌ **Word Not Found**
+        await bot.sendMessage(msg.chat.id, `❌ **Word Not Found in Database**
 
-📝 **"${wordToCorrect}"** is not in our database yet.
+📝 **"${wordToCorrect}"** is not in any collection yet.
 
 🎯 **What you can do:**
-1️⃣ **Add it first:** Ask me "${wordToCorrect}" and teach me the translation
-2️⃣ **Check spelling:** Make sure the English word is correct
-3️⃣ **Browse words:** Use **/learned** to see available words
+1️⃣ **Add it first:** Ask me "${wordToCorrect}" and teach the translation
+2️⃣ **Check spelling:** Verify the English word is correct
+3️⃣ **Browse words:** Use **/learned** to see taught dictionary
 
-**Database searched:**
+**Collections searched:**
 • ${Object.keys(tuluDictionary).length} base dictionary words
-• ${Object.keys(learnedWords).length} community contributed words
+• ${taughtWords ? Object.keys(taughtWords).length : 0} taught dictionary words
 
-💡 **Once you teach me "${wordToCorrect}", you can then use /correct to fix it if needed.**`, {parse_mode: 'Markdown'});
+💡 **Once you teach "${wordToCorrect}", you can use /correct to improve it.**`, {parse_mode: 'Markdown'});
     }
 });
 
-// Enhanced stats command
+// Enhanced stats command with collection breakdown
 bot.onText(/\/stats/, async (msg) => {
     extendKeepAlive();
     
-    const dbWordCount = await getSharedDBWordCount();
+    const taughtStats = await getTaughtDictionaryStats();
+    const cacheStats = await getAPICacheStats();
     const uptime = Math.floor(process.uptime() / 60);
     const hours = Math.floor(uptime / 60);
     const minutes = uptime % 60;
     const isKeepAliveActive = keepAliveInterval !== null;
-    const recentWords = await getRecentWordsFromSharedDB(5);
     
-    const recentList = recentWords.length > 0 
-        ? recentWords.map(w => `• "${w.english}" → "${w.tulu}"`).join('\n')
-        : 'No recent contributions yet';
+    const recentList = taughtStats.recent.length > 0 
+        ? taughtStats.recent.map(w => 
+            `• "${w.english}" → "${w.tulu}"\n  👤 ${w.contributor} • 🔄 ${w.usage_count} uses`
+          ).join('\n\n')
+        : 'No user contributions yet - be the first!';
     
-    const statsMessage = `📊 **Complete Bot Statistics**
+    const statsMessage = `📊 **Enhanced Database Statistics**
 
 ⚡ **Service Status:**
 • **Uptime:** ${hours}h ${minutes}m
 • **Keep-Alive:** ${isKeepAliveActive ? 'Active (45min)' : 'Sleeping'}
-• **Wake-on-Start:** ✅ No 15-minute delays
-• **Database:** ${mongoAvailable ? 'Shared MongoDB (Live)' : 'Memory + API (Fallback)'}
+• **Wake-on-Start:** ✅ Instant response
+• **Database:** ${mongoAvailable ? 'MongoDB Atlas (Enhanced)' : 'Memory + API'}
 
-📚 **Vocabulary Breakdown:**
-• **Base Dictionary:** ${Object.keys(tuluDictionary).length} verified words
-• **Community Shared:** ${dbWordCount} contributed words
-• **Total Available:** ${Object.keys(tuluDictionary).length + dbWordCount} words
-• **API Fallback:** Google Translate + MyMemory
+🗄️ **Database Collections:**
+• **🏆 Base Dictionary:** ${Object.keys(tuluDictionary).length} verified Tulu words
+• **📚 Taught Dictionary:** ${taughtStats.count} user contributions
+• **🌐 API Cache:** ${cacheStats.count} cached translations
+• **📊 Total Vocabulary:** ${Object.keys(tuluDictionary).length + taughtStats.count}+ words
 
-📈 **Recent Community Contributions:**
+📈 **Recent User Contributions:**
 ${recentList}
 
 🎯 **Translation Success Rate:**
-• **Tier 1 (Base):** Instant, 100% accurate
-• **Tier 2 (Community):** Instant, user-verified  
-• **Tier 3 (API):** 2-3 seconds, needs verification
-• **Tier 4 (Learning):** User teaches authentic Tulu
+• **Tier 1 (Base):** Instant, 100% verified Tulu
+• **Tier 2 (Taught):** Instant, user-verified authentic  
+• **Tier 3 (Cache):** <1 second, previously translated
+• **Tier 4 (Fresh API):** 2-3 seconds, needs verification
+• **Tier 5 (Teaching):** Community builds authentic database
 
-💾 **Database Features:**
-${mongoAvailable ? '✅ **Shared across all users**' : '⚠️ **Session-based (temporary)**'}
-${mongoAvailable ? '✅ **Real-time synchronization**' : '✅ **API fallback active**'}
-${mongoAvailable ? '✅ **Permanent storage**' : '✅ **Fast memory access**'}
-${mongoAvailable ? '✅ **Usage analytics**' : '✅ **Multi-API support**'}
+💾 **MongoDB Collections Structure:**
+${mongoAvailable ? '✅ **taught_dictionary** - User contributions with attribution' : '⚠️ **Memory storage** - Session-based'}
+${mongoAvailable ? '✅ **api_cache** - Performance optimization (7-day TTL)' : '✅ **API fallback** - Multiple translation sources'}
+${mongoAvailable ? '✅ **Comprehensive indexes** - Fast queries and analytics' : '✅ **Fast memory access** - No network delays'}
 
-🚀 **Next milestone:** ${1000 - (Object.keys(tuluDictionary).length + dbWordCount)} words to reach 1000 total vocabulary!`;
+🚀 **Building authentic Tulu together - ${1000 - (Object.keys(tuluDictionary).length + taughtStats.count)} words to reach 1000!**`;
 
     await bot.sendMessage(msg.chat.id, statsMessage, {parse_mode: 'Markdown'});
 });
 
-// Enhanced learned words command
+// Enhanced learned command for taught dictionary
 bot.onText(/\/learned/, async (msg) => {
     extendKeepAlive();
     
-    const dbWordCount = await getSharedDBWordCount();
+    const taughtStats = await getTaughtDictionaryStats();
     
-    if (dbWordCount === 0) {
-        await bot.sendMessage(msg.chat.id, `📝 **Community Database Empty**
+    if (taughtStats.count === 0) {
+        await bot.sendMessage(msg.chat.id, `📝 **Taught Dictionary Collection Empty**
 
-🎯 **Be the first contributor!**
-Ask me any English word and teach me authentic Tulu:
+🎯 **Be the first contributor to taught_dictionary!**
 
-**Example conversation:**
-👤 You: "I miss you"
-🤖 Bot: "I don't know this - teach me!"
-👤 You: "naan ninna kandustini"
-🤖 Bot: "Learned and saved to shared database!"
+**How the enhanced system works:**
+1️⃣ Ask me any English word/phrase
+2️⃣ System checks: Base → Taught → API Cache → Fresh API
+3️⃣ If not found, I ask you to teach authentic Tulu
+4️⃣ Your word goes to **taught_dictionary** collection with attribution
 
-**Benefits:**
-${mongoAvailable ? '✅ Your contribution helps ALL users' : '✅ Your contribution helps current session'}
-${mongoAvailable ? '✅ Permanently stored and shared' : '✅ Fast memory-based access'}
-✅ You become part of Tulu preservation
-✅ Priority over API translations
+**Benefits of separate collections:**
+${mongoAvailable ? '✅ **User attribution** - Credit for your contributions' : '✅ **Session storage** - Fast access'}
+${mongoAvailable ? '✅ **Organized storage** - taught_dictionary vs api_cache' : '✅ **Memory optimization** - Best performance'}
+${mongoAvailable ? '✅ **Analytics** - Track usage, popular words' : '✅ **API integration** - Multiple sources'}
+✅ **Higher priority** - Your words beat API results
+✅ **Community building** - Preserve authentic Tulu
 
 **Start contributing now!**`, {parse_mode: 'Markdown'});
         return;
     }
     
-    const recentWords = await getRecentWordsFromSharedDB(10);
-    const recentList = recentWords
-        .map(w => `• "${w.english}" → "${w.tulu}"`)
-        .join('\n');
+    const recentList = taughtStats.recent
+        .map(w => `• "${w.english}" → "${w.tulu}"
+  👤 Contributor: ${w.contributor}
+  📅 Added: ${w.updatedAt.toLocaleDateString()}
+  🔄 Used: ${w.usage_count} times`)
+        .join('\n\n');
     
-    const message = `📚 **Community Shared Database**
+    const message = `📚 **Taught Dictionary Collection**
 
-🗄️ **Total Contributions:** ${dbWordCount} words
-${mongoAvailable ? '🌍 **Shared with all users**' : '💭 **Current session'}  
-${mongoAvailable ? '✅ **Permanently stored**' : '⚡ **Memory cached**'}
+🗄️ **MongoDB Collection:** taught_dictionary  
+📊 **Total User Contributions:** ${taughtStats.count} words
+${mongoAvailable ? '🌍 **Shared across all users globally**' : '💭 **Available in current session**'}  
 
-**Recent Contributions:**
+**Recent Authentic Contributions:**
 ${recentList}
 
-${dbWordCount > 10 ? `\n*📊 ...and ${dbWordCount - 10} more words in shared database*\n` : ''}
+${taughtStats.count > 5 ? `\n*📊 ...and ${taughtStats.count - 5} more words in taught_dictionary collection*\n` : ''}
 
-🔧 **Database Management:**
-• **/correct <word>** - Fix any community word
-• Ask me new words - Add to shared database
-• Community verification - Better than API
+🎯 **Enhanced Database Structure:**
+• **Base Dictionary** → Built-in verified Tulu (highest priority)
+• **Taught Dictionary** → Your authentic contributions (2nd priority)
+• **API Cache** → Performance optimization (3rd priority)
+• **Fresh API** → Real-time translation (4th priority)
 
-💡 **Database Highlights:**
-${mongoAvailable ? '✅ **Real-time sync** - Your edits appear instantly' : '✅ **Fast access** - No network delays'}
-${mongoAvailable ? '✅ **Multi-user collaboration** - Everyone contributes' : '✅ **API-enhanced** - Multiple translation sources'}
-${mongoAvailable ? '✅ **Usage tracking** - Popular words highlighted' : '✅ **Session-optimized** - Best performance'}
+💡 **Your Impact with Attribution:**
+${mongoAvailable ? '✅ **Permanent cloud storage** - Never lost' : '✅ **Fast session storage** - Instant access'}
+${mongoAvailable ? '✅ **User attribution** - Credit preserved forever' : '✅ **Immediate availability** - No delays'}
+${mongoAvailable ? '✅ **Usage analytics** - Track word popularity' : '✅ **Memory efficiency** - Optimized performance'}
+✅ **Community resource** - Helps preserve authentic Tulu
+✅ **Higher priority** - Beats API translations always
 
-🎯 **Building authentic Tulu together!**`;
+🔧 **Collection Management:**
+• **/correct <word>** - Update taught_dictionary entries
+• Ask new words - Add to taught_dictionary with your attribution
+• **/stats** - See collection analytics
+
+🌍 **Building the world's largest authentic Tulu database together!**`;
     
     await bot.sendMessage(msg.chat.id, message, {parse_mode: 'Markdown'});
 });
 
-// Numbers reference
+// Numbers reference (same as before)
 bot.onText(/\/numbers/, (msg) => {
     extendKeepAlive();
     
@@ -803,12 +984,13 @@ bot.onText(/\/numbers/, (msg) => {
 • Type "fifteen" → paddaidu  
 • Type "hundred" → nuru
 
-✅ All numbers are in the base dictionary - instant translation!`;
+✅ All numbers in base dictionary - instant translation!
+📚 Part of ${Object.keys(tuluDictionary).length} verified base words`;
 
     bot.sendMessage(msg.chat.id, numbersMessage, {parse_mode: 'Markdown'});
 });
 
-// Enhanced main message handler
+// Enhanced main message handler with 5-tier system
 bot.on('message', async (msg) => {
     if (msg.text && !msg.text.startsWith('/')) {
         const userText = msg.text.trim();
@@ -818,9 +1000,9 @@ bot.on('message', async (msg) => {
         extendKeepAlive();
         console.log(`📩 ${userName}: "${userText}"`);
         
-        // Reload shared database
+        // Reload taught dictionary for latest contributions
         if (mongoAvailable) {
-            learnedWords = await loadWordsFromSharedDB();
+            learnedWords = await loadFromTaughtDictionary();
         }
         
         // Handle learning/correction modes
@@ -828,54 +1010,65 @@ bot.on('message', async (msg) => {
             const userState = userStates[userId];
             
             if (userState.mode === 'learning') {
+                // User is teaching authentic Tulu to taught_dictionary
                 const userInfo = `${userName} (${userId})`;
                 const success = await learnNewWord(userState.englishWord, userText, userId, userInfo);
                 
                 if (success) {
-                    const storageType = mongoAvailable ? 'shared database' : 'memory';
-                    const sharing = mongoAvailable ? 'Available to all users instantly!' : 'Cached for this session';
+                    const storageType = mongoAvailable ? 'taught_dictionary collection' : 'session memory';
+                    const impact = mongoAvailable ? 'Available to ALL users globally!' : 'Available in current session';
                     
-                    const successMessage = `✅ **Added to ${mongoAvailable ? 'Shared' : 'Memory'} Dictionary!**
+                    const successMessage = `✅ **Added to Taught Dictionary Collection!**
 
 📝 **English:** ${userState.originalText}  
-🏛️ **Tulu:** ${userText}
-👤 **Contributor:** ${userName}
+🏛️ **Authentic Tulu:** ${userText}
+👤 **Contributor:** ${userName} (attributed)
+🗄️ **Stored in:** MongoDB ${storageType}
 
-💾 **Storage:** ${storageType}
-🌍 **Impact:** ${sharing}
+🌍 **Global Impact:** ${impact}
+🏆 **Priority:** Tier 2 - Higher than any API translation
+📈 **Database Growth:** +1 authentic community word
 
 **Test it:** Ask me "${userState.originalText}" again!
 **Share it:** Tell others to try "${userState.originalText}"
 
-🙏 **Thank you for preserving authentic Tulu!**`;
+🙏 **Thank you for preserving authentic Tulu language!**
+🎯 **Your contribution helps the entire Tulu community worldwide!**`;
 
                     await bot.sendMessage(msg.chat.id, successMessage, {parse_mode: 'Markdown'});
                 } else {
-                    await bot.sendMessage(msg.chat.id, `❌ **Could not save translation**
+                    await bot.sendMessage(msg.chat.id, `❌ **Could not save to taught_dictionary**
 
-Please try again: Ask me "${userState.originalText}" and provide the Tulu translation.`);
+Please try again: Ask me "${userState.originalText}" and provide the authentic Tulu translation.
+
+💡 **Tips for better contributions:**
+• Use Roman letters (English alphabet)
+• Provide the most authentic/common version
+• Double-check spelling before submitting`);
                     delete userStates[userId];
                 }
                 return;
                 
             } else if (userState.mode === 'correcting') {
+                // User correcting taught dictionary entry
                 const oldTranslation = userState.oldTranslation;
                 const correctorInfo = `${userName} (Corrector)`;
                 const success = await learnNewWord(userState.englishWord, userText, userId, correctorInfo);
                 
                 if (success) {
-                    const correctionMessage = `✅ **Translation Corrected in Shared Database!**
+                    const correctionMessage = `✅ **Taught Dictionary Updated!**
 
 📝 **English:** ${userState.originalText}
-❌ **Old:** ${oldTranslation}  
-✅ **New:** ${userText}
+❌ **Previous:** ${oldTranslation}  
+✅ **Your Correction:** ${userText}
 👤 **Corrected by:** ${userName}
 
-🗄️ **Updated in:** ${mongoAvailable ? 'Shared database' : 'Memory'}
-🌍 **Effect:** ${mongoAvailable ? 'All users see the correction immediately' : 'Available in current session'}
+🗄️ **Collection:** taught_dictionary updated in MongoDB
+🌍 **Effect:** All users globally see your correction immediately
+📊 **Attribution:** Your contribution is credited
 
 **Verify:** Ask me "${userState.originalText}" to confirm
-**Impact:** Better translations for everyone!`;
+🎯 **Community gets better authentic Tulu thanks to you!**`;
 
                     await bot.sendMessage(msg.chat.id, correctionMessage, {parse_mode: 'Markdown'});
                 } else {
@@ -888,7 +1081,7 @@ Please try: **/correct ${userState.originalText}** again`);
             }
         }
         
-        // Normal translation request
+        // Normal translation request with enhanced 5-tier system
         const englishPattern = /^[a-zA-Z0-9\s.,!?'"-]+$/;
         
         if (englishPattern.test(userText)) {
@@ -897,75 +1090,127 @@ Please try: **/correct ${userState.originalText}** again`);
             const result = await translateToTulu(userText, userId);
             
             if (result.found) {
-                const tierEmoji = {1: '🏆', 2: '🎯', 3: '🌐', 4: '❓'}[result.tier] || '✅';
-                const priority = {1: 'Highest', 2: 'High', 3: 'Medium', 4: 'Learning'}[result.tier] || 'Standard';
+                const tierEmoji = {
+                    1: '🏆', // Base dictionary
+                    2: '🎯', // Taught dictionary 
+                    3: '💾', // API cache
+                    4: '🌐', // Fresh API
+                    5: '❓'  // Unknown
+                }[result.tier] || '✅';
                 
-                const response = `${tierEmoji} **Translation Found**
+                const priority = {
+                    1: 'Highest (Verified)', 
+                    2: 'High (User-Taught)', 
+                    3: 'Good (Cached)',
+                    4: 'Medium (Fresh API)', 
+                    5: 'Learning'
+                }[result.tier] || 'Standard';
+                
+                let responseMessage = `${tierEmoji} **Translation Found**
 
 📝 **English:** ${userText}
-🏛️ **Tulu:** ${result.translation}
+🏛️ **Translation:** ${result.translation}
 
 📊 **Source:** ${result.source}
 ⭐ **Priority:** ${priority}
-💾 **Database:** ${mongoAvailable ? 'Shared (Live)' : 'Memory + API'}
+🗄️ **Database:** ${mongoAvailable ? 'Enhanced MongoDB Collections' : 'Memory + API'}`;
 
-${result.tier === 3 ? '⚠️ **API Result** - Please verify accuracy. You can improve it with **/correct ' + userText.toLowerCase() + '**' : ''}
-${result.tier <= 2 ? '💡 **Correction:** Use **/correct ' + userText.toLowerCase() + '** to improve this translation' : ''}
+                // Add tier-specific messaging
+                if (result.tier >= 3 && result.needsVerification) {
+                    responseMessage += `
+
+🌐 **API Translation Note:**
+• Accurate general translation
+• May not be authentic Tulu
+• **Improve it:** **/correct ${userText.toLowerCase()}**
+• Your correction goes to taught_dictionary with attribution`;
+                } else if (result.tier === 2) {
+                    responseMessage += `
+
+🎯 **User-Taught Translation:**
+• Contributed by community member
+• Authentic and verified
+• **Improve it:** **/correct ${userText.toLowerCase()}** if needed`;
+                } else {
+                    responseMessage += `
+
+💡 **Enhance database:** Use **/correct ${userText.toLowerCase()}** to add community version`;
+                }
+
+                responseMessage += `
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`;
 
-                await bot.sendMessage(msg.chat.id, response, {parse_mode: 'Markdown'});
+                await bot.sendMessage(msg.chat.id, responseMessage, {parse_mode: 'Markdown'});
                 
             } else {
-                const vocabSize = Object.keys(tuluDictionary).length + Object.keys(learnedWords).length;
+                // No translation found anywhere - comprehensive search completed
+                const taughtStats = await getTaughtDictionaryStats();
+                const cacheStats = await getAPICacheStats();
                 
-                const learnMessage = `❓ **"${userText}" - Help Us Learn!**
+                const learnMessage = `❓ **"${userText}" - Not Found Anywhere**
 
-🔍 **Searched everywhere:**
-• ${Object.keys(tuluDictionary).length} base dictionary words
-• ${Object.keys(learnedWords).length} community words  
-• Google Translate API
-• MyMemory Translation API
+🔍 **Comprehensive Search Completed:**
+✅ ${Object.keys(tuluDictionary).length} base dictionary words
+✅ ${taughtStats.count} taught dictionary words
+✅ ${cacheStats.count} cached API translations
+✅ Google Translate API (Hindi, Kannada)
+✅ MyMemory Translator API
 
-🎯 **Teach Authentic Tulu:**
-Reply with the correct Tulu translation in Roman letters
+**All 5 tiers searched - Your help needed!**
 
-**Why teach us?**
-${mongoAvailable ? '🌍 **Helps all users** - Your knowledge becomes shared' : '⚡ **Fast access** - Better than API translations'}
-${mongoAvailable ? '💾 **Permanent impact** - Stored forever in database' : '🎯 **Session benefit** - Available immediately'}
-🏆 **Higher priority** - Beats API translations
-🏛️ **Cultural preservation** - Authentic Tulu matters
+🎯 **Teach Authentic Tulu to taught_dictionary:**
+Reply with the correct Tulu translation (Roman letters)
 
-**Example:**
-👤 You: "naan tumba khushi"
-🤖 Result: Added to shared dictionary!
+**Why your contribution matters:**
+${mongoAvailable ? '🌍 **Global impact** - Helps ALL users worldwide' : '⚡ **Session benefit** - Fast access this session'}
+${mongoAvailable ? '🏆 **User attribution** - You get credit forever' : '🎯 **Memory efficiency** - Instant availability'}
+${mongoAvailable ? '📊 **Analytics** - Track usage and popularity' : '✅ **Performance** - Better than API calls'}
+🥇 **Tier 2 priority** - Higher than any API translation
+🏛️ **Cultural preservation** - Authentic Tulu matters most
+📈 **Database growth** - Every word makes it better
 
-⏰ **Request expires in 10 minutes**
+**Examples of good contributions:**
+• "I miss you" → "naan ninna miss madtini"  
+• "How's everything?" → "yellu henganide?"
+• "Take care" → "jagrathegiri"
+
+⏰ **Teaching request expires in 10 minutes**
 🔧 **Commands:** **/skip** to cancel`;
 
                 await bot.sendMessage(msg.chat.id, learnMessage, {parse_mode: 'Markdown'});
                 
-                // Auto-expire learning
+                // Auto-expire learning request
                 setTimeout(() => {
                     if (userStates[userId] && userStates[userId].englishWord === userText.toLowerCase()) {
                         delete userStates[userId];
-                        bot.sendMessage(msg.chat.id, `⏰ **Learning expired for "${userText}"**
+                        bot.sendMessage(msg.chat.id, `⏰ **Teaching request expired for "${userText}"**
 
-Ready for new translations! Try another word.`).catch(() => {});
+🔄 **Ready for new translations!**
+💡 **Try different words** or browse **/learned** to see taught dictionary`).catch(() => {});
                     }
                 }, 10 * 60 * 1000);
             }
         } else {
+            const taughtStats = await getTaughtDictionaryStats();
+            const totalWords = Object.keys(tuluDictionary).length + taughtStats.count;
+            
             await bot.sendMessage(msg.chat.id, `❌ **Please send English text only**
 
-✅ **Supported:**
+✅ **Supported formats:**
 • English words and phrases
-• Numbers (1, 2, 3 or "one", "two", "three")  
+• Numbers (handled by base dictionary)
 • Simple punctuation
 
-📊 **Current database:** ${Object.keys(getCombinedDictionary()).length} words + API fallback
-🎯 **Goal:** English → Tulu (Roman letters)`);
+📊 **Enhanced database system:**
+• ${totalWords}+ words across multiple collections
+• 5-tier translation priority system
+• Multi-API integration with caching
+• User attribution and analytics
+
+🎯 **Goal:** English → Authentic Tulu (Roman letters)
+💡 **Try:** "hello", "thank you", "good morning"`);
         }
     }
 });
@@ -980,20 +1225,20 @@ bot.onText(/\/skip|\/cancel/, (msg) => {
     if (cleared) {
         bot.sendMessage(msg.chat.id, `✅ **Operation Cancelled**
 
-Ready for new translations!
-• Ask me any English word
-• Use **/correct <word>** to fix translations
-• Use **/stats** for statistics
+🔄 **Ready for new translations!**
+• Ask me any English word or phrase
+• Use **/correct <word>** to fix taught dictionary
+• Use **/stats** for enhanced database statistics
 
-🔄 **Bot is ready for your next query**`);
+🗄️ **Enhanced collections ready** for your contributions`);
     } else {
         bot.sendMessage(msg.chat.id, `💭 **No active operation**
 
-🎯 **Try these:**
-• Type any English word for translation
-• **/stats** - Bot statistics  
-• **/learned** - Community contributions
-• **/numbers** - Number reference`);
+🎯 **Try these enhanced features:**
+• Type any English word for 5-tier translation
+• **/stats** - Enhanced database statistics  
+• **/learned** - Browse taught dictionary
+• **/numbers** - Complete number reference`);
     }
 });
 
@@ -1011,7 +1256,7 @@ process.on('SIGTERM', async () => {
     console.log('📴 Graceful shutdown initiated...');
     if (client && mongoAvailable) {
         await client.close();
-        console.log('🗄️ MongoDB connection closed');
+        console.log('🗄️ Enhanced MongoDB connection closed');
     }
     bot.stopPolling();
     process.exit(0);
@@ -1019,49 +1264,53 @@ process.on('SIGTERM', async () => {
 
 // Start health server
 app.listen(PORT, () => {
-    console.log(`🌐 Health server running on port ${PORT}`);
+    console.log(`🌐 Enhanced health server running on port ${PORT}`);
 });
 
 // Enhanced startup sequence
 async function startBot() {
     try {
-        console.log('🔧 Initializing shared MongoDB database...');
+        console.log('🔧 Initializing enhanced MongoDB collections...');
         mongoAvailable = await initializeMongoDB();
         
         if (mongoAvailable) {
-            console.log('📚 Loading community words from shared database...');
-            learnedWords = await loadWordsFromSharedDB();
+            console.log('📚 Loading taught dictionary from enhanced collections...');
+            learnedWords = await loadFromTaughtDictionary();
         } else {
             console.log('⚡ Running with memory storage + API fallback');
         }
         
-        console.log('🤖 Starting Telegram bot with wake-on-start...');
-        const botInfo = await bot.getMe();
-        const dbWordCount = await getSharedDBWordCount();
+        console.log('🤖 Starting enhanced bot with conflict prevention...');
+        await startBotSafely();
+        
+        const taughtStats = await getTaughtDictionaryStats();
+        const cacheStats = await getAPICacheStats();
         
         console.log('✅ ================================================');
-        console.log('✅ PRODUCTION TULU TRANSLATOR BOT IS LIVE!');
+        console.log('✅ ENHANCED TULU TRANSLATOR BOT IS LIVE!');
         console.log('✅ ================================================\n');
         
-        console.log(`🤖 Bot: @${botInfo.username}`);
-        console.log(`🗄️ Database: ${mongoAvailable ? 'Shared MongoDB Atlas' : 'Memory + Multi-API'}`);
+        console.log(`🤖 Bot: @${(await bot.getMe()).username}`);
+        console.log(`🗄️ Database: ${mongoAvailable ? 'Enhanced MongoDB Collections' : 'Memory + Multi-API'}`);
         console.log(`⚡ Wake-on-Start: Active (No 15min delays)`);
         console.log(`🏓 Keep-Alive: Enhanced 45-minute sessions`);
         console.log(`📚 Base Dictionary: ${Object.keys(tuluDictionary).length} verified words`);
-        console.log(`🌍 Community Database: ${dbWordCount} shared words`);
-        console.log(`🎯 Total Vocabulary: ${Object.keys(tuluDictionary).length + dbWordCount} words`);
-        console.log(`🌐 API Fallback: Google Translate + MyMemory`);
-        console.log(`🔧 Correction System: Active for community words`);
-        console.log(`👥 User Experience: Clean and friendly interface`);
+        console.log(`🎯 Taught Dictionary: ${taughtStats.count} user contributions`);
+        console.log(`💾 API Cache: ${cacheStats.count} cached translations`);
+        console.log(`🌍 Total Vocabulary: ${Object.keys(tuluDictionary).length + taughtStats.count}+ words`);
+        console.log(`🌐 API Integration: Google + MyMemory with smart caching`);
+        console.log(`🔧 Collections: taught_dictionary + api_cache`);
+        console.log(`👥 User Attribution: Full credit system`);
+        console.log(`📊 Analytics: Usage tracking and statistics`);
         console.log('');
-        console.log('🚀 Ready for production use!');
-        console.log('🏛️ Preserving authentic Tulu with community collaboration!');
+        console.log('🚀 Ready for production with enhanced features!');
+        console.log('🏛️ Building the world\'s largest authentic Tulu database!');
         
     } catch (error) {
-        console.error('❌ Bot startup failed:', error);
+        console.error('❌ Enhanced bot startup failed:', error);
         process.exit(1);
     }
 }
 
-// Start the complete production bot
+// Start the complete enhanced bot
 startBot();
