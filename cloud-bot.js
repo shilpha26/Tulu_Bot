@@ -1,6 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const { MongoClient } = require('mongodb');
+require('dotenv').config();
 
 // Use global fetch on Node 18+; fall back to node-fetch only if necessary
 const fetch = (typeof global.fetch === 'function') 
@@ -70,22 +71,22 @@ function startKeepAlive() {
         }
         
         try {
-                const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 5000);
-                const response = await fetch(`${baseUrl}/health`, {
-                    signal: controller.signal,
-                    headers: { 'User-Agent': 'TuluBot-KeepAlive/1.0' }
-                });
-                clearTimeout(timeout);
-                
-                if (response.ok) {
-                    const remainingTime = Math.ceil((KEEP_ALIVE_DURATION - timeSinceActivity) / (60 * 1000));
-                    console.log(`🏓 Keep-alive ping successful - ${remainingTime} min remaining`);
-                }
-            } catch (error) {
-                console.log('🚨 Keep-alive ping failed:', (error && error.name === 'AbortError') ? 'timeout' : error.message);
+            const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            const response = await fetch(`${baseUrl}/health`, {
+                signal: controller.signal,
+                headers: { 'User-Agent': 'TuluBot-KeepAlive/1.0' }
+            });
+            clearTimeout(timeout);
+            
+            if (response.ok) {
+                const remainingTime = Math.ceil((KEEP_ALIVE_DURATION - timeSinceActivity) / (60 * 1000));
+                console.log(`🏓 Keep-alive ping successful - ${remainingTime} min remaining`);
             }
+        } catch (error) {
+            console.log('🚨 Keep-alive ping failed:', (error && error.name === 'AbortError') ? 'timeout' : error.message);
+        }
     }, PING_INTERVAL);
 }
 
@@ -194,53 +195,70 @@ async function initializeMongoDB() {
 
 // YOUR WORKING API METHOD - Corrected to use authentic Tulu (tcy)
 async function tryAPITranslation(text) {
-    // Skip API for very short words or numbers (already in base dictionary)
-    if (text.length <= 2 || /^\d+$/.test(text)) return null;
+    // Skip API for very short words or numbers
+    if (text.length <= 2 || /^\d+$/.test(text)) {
+        console.log('🔍 Skipping API for short text/numbers:', text);
+        return null;
+    }
     
-    console.log(`🔍 Trying Google Translate with authentic Tulu code (tcy) for: "${text}"`);
+    console.log(`🔍 Attempting Tulu translation API for: "${text}"`);
     
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tcy&dt=t&q=${encodeURIComponent(text)}`;
+    // Updated Google Translate API URL with proper parameters
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tcy&dt=t&dj=1&q=${encodeURIComponent(text)}`;
     
     try {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 1500));
         
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
+        
         const response = await fetch(url, {
             headers: { 
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9,tcy;q=0.8',
+                'Origin': 'https://translate.google.com',
+                'Referer': 'https://translate.google.com/'
             },
             signal: controller.signal
         });
         clearTimeout(timeout);
         
         if (!response.ok) {
-            console.log(`🚫 Tulu API responded with status ${response.status}`);
+            console.log(`🚫 API Error: Status ${response.status}`);
             return null;
         }
         
         const result = await response.json();
+        console.log('API Response:', JSON.stringify(result).slice(0, 200)); // Debug log
         
-        // Validate response structure and content
-        if (Array.isArray(result) && Array.isArray(result[0])) {
-            const pieces = result[0]
+        // Handle different response formats
+        let translation = '';
+        if (result.sentences && Array.isArray(result.sentences)) {
+            translation = result.sentences
+                .map(s => s.trans || '')
+                .filter(Boolean)
+                .join(' ')
+                .trim();
+        } else if (Array.isArray(result) && Array.isArray(result[0])) {
+            translation = result[0]
                 .map(part => Array.isArray(part) ? part[0] : '')
-                .filter(Boolean);
-            
-            const translation = pieces.join('').trim();
-            
-            // Reject if empty or contains Kannada script (likely wrong script)
-            if (!translation || /[\u0C80-\u0CFF]/.test(translation)) {
-                console.log('🚫 Invalid translation or wrong script received from API');
-                return null;
-            }
-            
-            return { translation, source: 'GoogleTranslate (tcy)' };
+                .filter(Boolean)
+                .join(' ')
+                .trim();
         }
         
-        return null;
+        // Reject empty or single character responses
+        if (!translation || translation === 'ಈ' || translation.length <= 1) {
+            console.log('🚫 Rejecting invalid/incomplete response:', translation);
+            return null;
+        }
+        
+        console.log(`✅ Valid translation received: "${translation}"`);
+        return { translation, source: 'GoogleTranslate (tcy)' };
+        
     } catch (error) {
-        console.log(`🚫 Tulu API error: ${error && error.name === 'AbortError' ? 'timeout' : error.message}`);
+        console.log(`🚫 API Error: ${error.name === 'AbortError' ? 'timeout' : error.message}`);
         return null;
     }
 }
@@ -462,7 +480,7 @@ app.get('/', async (req, res) => {
     const stats = {
         status: 'running',
         bot: 'Authentic Tulu Translator with Performance Optimizations',
-        version: '5.2.0', // Updated version
+        version: '5.2.0',
         uptime: Math.floor(process.uptime() / 60) + ' minutes',
         database_structure: {
             taught_dictionary: taughtStats.count,
@@ -586,57 +604,66 @@ function getCombinedDictionary() {
     return { ...tuluDictionary, ...learnedWords };
 }
 
-// CORRECTED 4-tier translation system: Base → Taught → API Cache → Tulu API (tcy) → User Teaching
+// CORRECTED 5-tier translation system: Base → Taught → API Cache → Tulu API (tcy) → User Teaching
 async function translateToTulu(text, userId) {
     const lowerText = text.toLowerCase().trim();
     
-    // Tier 1: Base dictionary (highest priority - verified Tulu)
+    // 1. First check Base dictionary (highest priority - verified Tulu)
     if (tuluDictionary[lowerText]) {
         const translation = tuluDictionary[lowerText];
         console.log(`✅ Base dictionary: "${translation}"`);
-        return { translation, found: true, source: 'Verified Base Dictionary', tier: 1 };
-    }
-    
-    // Tier 2: Taught Dictionary with caching (second priority - user-taught authentic Tulu)
-    const taughtWords = await getCachedTaughtWords(); // OPTIMIZED: Use cached version
-    if (taughtWords[lowerText]) {
-        const translation = taughtWords[lowerText];
-        console.log(`✅ Taught dictionary (cached): "${translation}"`);
-        return { translation, found: true, source: 'User-Taught Dictionary (Cached)', tier: 2 };
-    }
-    
-    // Tier 3: API Cache (check if we already translated this)
-    const cachedResult = await loadFromAPICache(lowerText);
-    if (cachedResult) {
-        console.log(`✅ API cache hit: "${cachedResult.translation}"`);
         return { 
-            translation: cachedResult.translation, 
+            translation, 
             found: true, 
-            source: `${cachedResult.source} (Cached)`, 
-            tier: 3,
-            needsVerification: true 
+            source: 'Verified Base Dictionary', 
+            tier: 1 
         };
     }
     
-    // Tier 4: Fresh Tulu API translation (YOUR WORKING METHOD)
+    // 2. Check Taught Dictionary
+    const taughtWords = await getCachedTaughtWords();
+    if (taughtWords[lowerText]) {
+        const translation = taughtWords[lowerText];
+        console.log(`✅ Taught dictionary (cached): "${translation}"`);
+        return { 
+            translation, 
+            found: true, 
+            source: 'User-Taught Dictionary', 
+            tier: 2 
+        };
+    }
+
+    // 3. Check API Cache
+    const cachedResult = await loadFromAPICache(lowerText);
+    if (cachedResult) {
+        console.log(`💾 API Cache hit: "${cachedResult.translation}"`);
+        return {
+            translation: cachedResult.translation,
+            found: true,
+            source: `Cached ${cachedResult.source}`,
+            tier: 3
+        };
+    }
+    
+    // 4. Try Google Translate API as last resort
     console.log(`🔍 Trying Google Translate Tulu API for: "${text}"`);
     const apiResult = await tryAPITranslation(text);
-    if (apiResult) {
-        // Save to cache for future use
+    if (apiResult && apiResult.translation) {
+        // Save valid API result to cache
         await saveToAPICache(lowerText, apiResult.translation, apiResult.source);
         
-        console.log(`🌐 Fresh Tulu API translation: "${apiResult.translation}"`);
+        console.log(`🌐 Fresh API translation: "${apiResult.translation}"`);
         return {
             translation: apiResult.translation,
             found: true,
-            source: `${apiResult.source} (Fresh)`,
+            source: apiResult.source,
             tier: 4,
             needsVerification: true
         };
     }
     
-    // Tier 5: Ask user to teach AUTHENTIC TULU (this is the key!)
-    console.log(`🎯 No Tulu translation found anywhere for: "${text}" - requesting authentic user contribution`);
+    // 5. No translation found after trying everything - Ask user to teach
+    console.log(`🎯 No translation found for: "${text}" - requesting user contribution`);
     userStates[userId] = {
         mode: 'learning',
         englishWord: lowerText,
@@ -644,7 +671,12 @@ async function translateToTulu(text, userId) {
         timestamp: Date.now()
     };
     
-    return { translation: null, found: false, source: 'needs_authentic_teaching', tier: 5 };
+    return { 
+        translation: null, 
+        found: false, 
+        source: 'needs_teaching', 
+        tier: 5 
+    };
 }
 
 // Enhanced learning function for taught dictionary
@@ -755,12 +787,6 @@ bot.onText(/\/start/, async (msg) => {
 4️⃣ **Google Translate (tcy)** → Attempts authentic Tulu
 5️⃣ **🔑 KEY: When API fails → YOU teach authentic Tulu!**
 
-💡 **Why This Works:**
-• APIs don't have good Tulu support
-• When API fails, YOU provide the authentic word
-• Everyone learns from your authentic contributions
-• Builds genuine Tulu database, not Hindi/Kannada substitutes
-
 💡 **Commands:**
 • Just type any English word or phrase
 • **/correct <word>** - Fix taught dictionary entries
@@ -768,8 +794,8 @@ bot.onText(/\/start/, async (msg) => {
 • **/learned** - Browse authentic user contributions
 
 🎯 **Try These:**
-• "Hello" → [translate:namaskara] (Base: <1ms)
-• "Thank you" → [translate:dhanyavada] (Base: <1ms)  
+• "Hello" → namaskara (Base: <1ms)
+• "Thank you" → dhanyavada (Base: <1ms)  
 • "I love you" → (API will likely fail → teach authentic Tulu!)
 
 🏛️ **Building the world's most authentic Tulu database with optimal performance!**`;
@@ -777,7 +803,7 @@ bot.onText(/\/start/, async (msg) => {
     await bot.sendMessage(msg.chat.id, welcomeMessage, {parse_mode: 'Markdown'});
 });
 
-// Enhanced /stats command with performance metrics
+// FIXED: Single /stats command with complete implementation
 bot.onText(/\/stats/, async (msg) => {
     extendKeepAlive();
     
@@ -829,50 +855,38 @@ bot.onText(/\/learned/, async (msg) => {
     const taughtStats = await getTaughtDictionaryStats();
     
     if (taughtStats.count === 0) {
-        await bot.sendMessage(msg.chat.id, `📝 **Taught Dictionary Empty**
+        await bot.sendMessage(msg.chat.id, `📚 **Taught Dictionary Empty**
 
-🎯 **Be the first contributor!**
+No user contributions yet - be the first to teach authentic Tulu!
 
-**How it works:**
-1️⃣ Ask me any English word/phrase
-2️⃣ If not found, I ask you to teach authentic Tulu
-3️⃣ Your word goes to taught_dictionary collection
+💡 **How to contribute:**
+• Ask me any English word/phrase
+• If I don't know it, teach me the Tulu translation
+• Your contribution helps preserve authentic Tulu
 
-**Benefits:**
-${mongoAvailable ? '✅ **Permanent storage** - Never lost' : '✅ **Session storage** - Fast access'}
-✅ **Higher priority** - Your words beat API results
-✅ **Community building** - Preserve authentic Tulu
-
-**Start contributing now!**`, {parse_mode: 'Markdown'});
+🎯 Try asking a word now!`, {parse_mode: 'Markdown'});
         return;
     }
     
     const recentList = taughtStats.recent
-        .map(w => `• "${w.english}" → "${w.tulu}"\n  👤 Contributor: ${w.contributor}\n  📅 Added: ${w.updatedAt.toLocaleDateString()}\n  🔄 Used: ${w.usage_count} times`)
+        .map((w, i) => `${i+1}. "${w.english}" = "${w.tulu}"
+   👤 Added by: ${w.contributor}
+   📊 Used: ${w.usage_count || 1} times`)
         .join('\n\n');
     
-    const message = `📚 **Taught Dictionary Collection**
+    const message = `📚 **Taught Dictionary Status**
 
-🗄️ **Total User Contributions:** ${taughtStats.count} words
-${mongoAvailable ? '🌍 **Shared globally** with all users' : '💭 **Available in current session**'}
+${mongoAvailable ? '🌐 Permanent Cloud Storage' : '💾 Temporary Session Storage'}
+📊 Total Words: ${taughtStats.count}
 
-**Recent Authentic Contributions:**
+**Recent Contributions:**
 ${recentList}
 
-${taughtStats.count > 5 ? `\n*📊 ...and ${taughtStats.count - 5} more words in collection*\n` : ''}
+${taughtStats.count > 5 ? `\n💡 ...and ${taughtStats.count - 5} more words in database` : ''}
 
-🎯 **Your Impact:**
-${mongoAvailable ? '✅ **Permanent cloud storage** - Helps everyone' : '✅ **Session storage** - Fast access'}
-✅ **Higher priority** - Always beats API translations
-✅ **Community resource** - Preserves authentic Tulu
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Use /correct to improve existing translations`;
 
-🔧 **Commands:**
-• **/correct <word>** - Update existing entries
-• Ask new words - Add to collection
-• **/stats** - See full analytics
-
-🌍 **Building authentic Tulu database together!**`;
-    
     await bot.sendMessage(msg.chat.id, message, {parse_mode: 'Markdown'});
 });
 
@@ -938,27 +952,6 @@ Try asking me to translate it first!`, {parse_mode: 'Markdown'});
     }
 });
 
-// Clear chat history command
-bot.onText(/\/clear/, async (msg) => {
-    try {
-        // Get chat history and delete messages
-        const messages = await bot.getChatHistory(msg.chat.id, 100);
-        for (const message of messages) {
-            await bot.deleteMessage(msg.chat.id, message.message_id);
-        }
-        
-        // Send confirmation that will auto-delete after 3 seconds
-        const confirmation = await bot.sendMessage(msg.chat.id, "🧹 Chat cleared!");
-        setTimeout(() => {
-            bot.deleteMessage(msg.chat.id, confirmation.message_id).catch(() => {});
-        }, 3000);
-        
-    } catch (error) {
-        console.error('Clear chat error:', error);
-        await bot.sendMessage(msg.chat.id, "❌ Could not clear chat. Make sure I have admin rights.");
-    }
-});
-
 // Skip/cancel command
 bot.onText(/\/skip|\/cancel/, (msg) => {
     extendKeepAlive();
@@ -1017,29 +1010,150 @@ bot.onText(/\/numbers/, (msg) => {
     bot.sendMessage(msg.chat.id, numbersMessage, {parse_mode: 'Markdown'});
 });
 
-// Enhanced main message handler with learning flow
+// Add message processing tracking
+let messageProcessing = new Set();
+let responseTracker = new Map(); // Track responses sent per user
+
+// Modified main message handler with single response guarantee
 bot.on('message', async (msg) => {
     if (!msg.text || msg.text.startsWith('/')) return;
 
-    const userText = msg.text.trim();
+    const messageId = `${msg.chat.id}_${msg.message_id}`;
     const userId = msg.from.id;
-    const userName = msg.from.first_name;
     
-    // Update last activity for keep-alive
-    extendKeepAlive();
-    
-    console.log(`📩 ${userName}: "${userText}"`);
+    // Prevent duplicate processing
+    if (messageProcessing.has(messageId)) {
+        return;
+    }
+    messageProcessing.add(messageId);
 
-    // Handle learning/correction mode
-    if (userStates[userId]) {
-        const state = userStates[userId];
+    // ✅ FIXED: Ensure only one response per user query
+    const responseKey = `${userId}_${Date.now()}`;
+    let responseSent = false;
+    
+    const sendSingleResponse = async (text, options = {}) => {
+        if (responseSent) return; // Prevent multiple responses
+        responseSent = true;
+        await bot.sendMessage(msg.chat.id, text, options);
+    };
+
+    try {
+        const userText = msg.text.trim();
+        const userName = msg.from.first_name;
         
-        if (state.mode === 'learning') {
-            // User is teaching a new word
-            const learned = await learnNewWord(state.englishWord, userText, userId, userName);
+        extendKeepAlive();
+        console.log(`📩 ${userName}: "${userText}"`);
+
+        // Handle learning/correction mode FIRST (priority)
+        if (userStates[userId]) {
+            const state = userStates[userId];
             
-            if (learned) {
-                await bot.sendMessage(msg.chat.id, `✅ **Thank you for teaching!**
+            if (state.mode === 'learning') {
+                const learned = await learnNewWord(state.englishWord, userText, userId, userName);
+                if (learned) {
+                    await sendSingleResponse(`✅ **Thank you for teaching!**
+
+📝 **English:** "${state.originalText}"
+🏛️ **Tulu:** "${userText}"
+👤 **Contributor:** ${userName}
+
+Your authentic Tulu word has been added to the taught dictionary.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`, {parse_mode: 'Markdown'});
+                }
+                return; // ✅ Exit after handling learning mode
+            }
+            
+            if (state.mode === 'correcting') {
+                const corrected = await learnNewWord(state.englishWord, userText, userId, userName);
+                if (corrected) {
+                    await sendSingleResponse(`✅ **Word Updated Successfully**
+
+📝 **English:** "${state.originalText}"
+🔄 **Old:** "${state.oldTranslation}"
+🆕 **New:** "${userText}"
+👤 **Updated by:** ${userName}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`, {parse_mode: 'Markdown'});
+                }
+                return; // ✅ Exit after handling correction mode
+            }
+        }
+
+        // Normal translation flow - ONLY if not in special mode
+        const result = await translateToTulu(userText, userId);
+        
+        if (result.found) {
+            // ✅ Translation found - send result
+            const tierEmoji = {
+                1: '🏆', 2: '🎯', 3: '💾', 4: '🌐', 5: '❓'
+            }[result.tier] || '✅';
+            
+            const responseMessage = `${tierEmoji} **Translation Found**
+
+📝 **English:** ${userText}
+🏛️ **Translation:** ${result.translation}
+📊 **Source:** ${result.source}
+${result.needsVerification ? '\n💡 **Improve:** /correct ' + userText.toLowerCase() : ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`;
+
+            await sendSingleResponse(responseMessage, {parse_mode: 'Markdown'});
+            
+        } else {
+            // ✅ No translation found - ask user to teach (this sets userStates[userId])
+            const teachMessage = `❓ **Teach me authentic Tulu!**
+
+I don't know "${userText}" in Tulu yet.
+
+Please reply with the Tulu translation using Roman letters.
+*(or /skip to cancel)*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`;
+
+            await sendSingleResponse(teachMessage, {parse_mode: 'Markdown'});
+        }
+
+    } finally {
+        // Clean up tracking
+        messageProcessing.delete(messageId);
+        setTimeout(() => {
+            responseTracker.delete(responseKey);
+        }, 5000); // Clean up response tracking after 5 seconds
+    }
+});
+
+// Main message handler with duplicate prevention
+bot.on('message', async (msg) => {
+    if (!msg.text || msg.text.startsWith('/')) return;
+
+    const messageId = `${msg.chat.id}_${msg.message_id}`;
+    
+    // Prevent duplicate processing
+    if (messageProcessing.has(messageId)) {
+        return;
+    }
+    messageProcessing.add(messageId);
+
+    try {
+        const userText = msg.text.trim();
+        const userId = msg.from.id;
+        const userName = msg.from.first_name;
+        
+        extendKeepAlive();
+        console.log(`📩 ${userName}: "${userText}"`);
+
+        // Handle learning/correction mode
+        if (userStates[userId]) {
+            const state = userStates[userId];
+            if (state.mode === 'learning') {
+                const learned = await learnNewWord(state.englishWord, userText, userId, userName);
+                if (learned) {
+                    await bot.sendMessage(msg.chat.id, `✅ **Thank you for teaching!**
 
 📝 **English:** "${state.originalText}"
 🏛️ **Tulu:** "${userText}"
@@ -1050,77 +1164,78 @@ Your authentic Tulu word has been added to the taught dictionary.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`, {parse_mode: 'Markdown'});
+                }
+                return;
             }
-            return;
-        }
-        
-        if (state.mode === 'correcting') {
-            // User is correcting an existing word
-            const corrected = await learnNewWord(
-                state.englishWord, 
-                userText, 
-                userId,
-                userName
-            );
-            
-            if (corrected) {
-                await bot.sendMessage(msg.chat.id, `✅ **Word Updated Successfully**
+            if (state.mode === 'correcting') {
+                const corrected = await learnNewWord(state.englishWord, userText, userId, userName);
+                if (corrected) {
+                    await bot.sendMessage(msg.chat.id, `✅ **Word Updated Successfully**
 
-📝 **English:** "${state.englishWord}"
+📝 **English:** "${state.originalText}"
 🔄 **Old:** "${state.oldTranslation}"
 🆕 **New:** "${userText}"
 👤 **Updated by:** ${userName}
 
-The dictionary has been updated with your correction.`, {parse_mode: 'Markdown'});
-                
-                delete userStates[userId];
-            }
-            return;
-        }
-    }
+The dictionary has been updated with your correction.
 
-    // Normal translation flow
-    const result = await translateToTulu(userText, userId);
-    
-    let responseMessage = '';
-    
-    if (result.found) {
-        const tierEmoji = {
-            1: '🏆', // Base dictionary
-            2: '🎯', // Taught dictionary 
-            3: '💾', // API cache
-            4: '🌐', // Fresh Tulu API
-            5: '❓'  // Unknown
-        }[result.tier] || '✅';
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`, { parse_mode: 'Markdown' });
+                    // ensure state cleared (learnNewWord already clears it, but do it defensively)
+                    delete userStates[userId];
+                }
+                return;
+            }
+        }
+
+        // Normal translation flow
+        const result = await translateToTulu(userText, userId);
+        let responseMessage = '';
         
-        responseMessage = `${tierEmoji} **Authentic Tulu Translation Found**
+        if (result.found) {
+            const tierEmoji = {
+                1: '🏆', // Base dictionary
+                2: '🎯', // Taught dictionary 
+                3: '💾', // API cache
+                4: '🌐', // Fresh Tulu API
+                5: '❓'  // Unknown
+            }[result.tier] || '✅';
+            
+            responseMessage = `${tierEmoji} **Authentic Tulu Translation Found**
 
 📝 **English:** ${userText}
 🏛️ **Translation:** ${result.translation}
 
-📊 **Source:** ${result.source}`;
+📊 **Source:** ${result.source}
+${result.needsVerification ? '\n💡 **Help improve:** Use **/correct ' + userText.toLowerCase() + '** to add authentic Tulu' : ''}`;
 
-        if (result.needsVerification) {
-            responseMessage += `
+        } else {
+            // Only if no translation found at all
+            userStates[userId] = {
+                mode: 'learning',
+                englishWord: userText.toLowerCase(),
+                originalText: userText,
+                timestamp: Date.now()
+            };
 
-💡 **Help improve:** Use **/correct ${userText.toLowerCase()}** to add authentic Tulu`;
-        }
-        
-    } else {
-        responseMessage = `❓ **Teach me authentic Tulu!**
+            responseMessage = `❓ **Teach me authentic Tulu!**
 
 I don't know how to say "${userText}" in authentic Tulu yet.
 
 Please reply with the correct Tulu translation using Roman letters (English alphabet).
 *(or use /skip to cancel)*`;
-    }
-    
-    responseMessage += `
+        }
+
+        responseMessage += `
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 **/stats** • 🔢 **/numbers** • 📚 **/learned**`;
-    
-    await bot.sendMessage(msg.chat.id, responseMessage, {parse_mode: 'Markdown'});
+
+        await bot.sendMessage(msg.chat.id, responseMessage, {parse_mode: 'Markdown'});
+    } finally {
+        // Clean up after processing
+        messageProcessing.delete(messageId);
+    }
 });
 
 // Error handling
