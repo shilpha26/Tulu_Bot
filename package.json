@@ -1,12 +1,12 @@
 {
-  "name": "tulu-learning-bot",
-  "version": "3.0.0",
-  "description": "Complete Cloud Tulu Learning Translator Bot with MongoDB Fallback",
+  "name": "production-tulu-translator",
+  "version": "4.0.0",
+  "description": "Complete Production Tulu Translator with Shared Database and API Integration",
   "main": "cloud-bot.js",
   "scripts": {
     "start": "node cloud-bot.js"
   },
-  "keywords": ["telegram", "bot", "tulu", "translator", "mongodb", "cloud"],
+  "keywords": ["telegram", "bot", "tulu", "translator", "mongodb", "production", "api"],
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
