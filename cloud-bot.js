@@ -1162,7 +1162,6 @@ Reply with the correct **authentic Tulu** translation (Roman letters)
 
 🏛️ **Building the most authentic Tulu database with optimal performance!**`);
         }
-    }
 });
 
 // Add all other bot commands (stats, learned, correct, skip, numbers) here...
