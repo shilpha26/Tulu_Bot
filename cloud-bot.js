@@ -720,6 +720,252 @@ bot.onText(/\/start/, async (msg) => {
     await bot.sendMessage(msg.chat.id, welcomeMessage, {parse_mode: 'Markdown'});
 });
 
+// Enhanced /stats command with performance metrics
+bot.onText(/\/stats/, async (msg) => {
+    extendKeepAlive();
+    
+    const taughtStats = await getTaughtDictionaryStats();
+    const cacheStats = await getAPICacheStats();
+    const uptime = Math.floor(process.uptime() / 60);
+    const hours = Math.floor(uptime / 60);
+    const minutes = uptime % 60;
+    const isKeepAliveActive = keepAliveInterval !== null;
+    
+    const recentList = taughtStats.recent.length > 0 
+        ? taughtStats.recent.map(w => 
+            `• "${w.english}" → "${w.tulu}"\n  👤 ${w.contributor} • 🔄 ${w.usage_count} uses`
+          ).join('\n\n')
+        : 'No user contributions yet - be the first!';
+    
+    const statsMessage = `📊 **Performance-Optimized Statistics**
+
+⚡ **Service Status:**
+• **Uptime:** ${hours}h ${minutes}m
+• **Keep-Alive:** ${isKeepAliveActive ? 'Active (45min)' : 'Sleeping'}
+• **Database:** ${mongoAvailable ? 'MongoDB Atlas (Optimized)' : 'Memory + API'}
+
+🗄️ **Database Collections:**
+• **🏆 Base Dictionary:** ${Object.keys(tuluDictionary).length} verified Tulu words
+• **📚 Taught Dictionary:** ${taughtStats.count} user contributions
+• **🌐 API Cache:** ${cacheStats.count} cached translations
+• **📊 Total Vocabulary:** ${Object.keys(tuluDictionary).length + taughtStats.count}+ words
+
+📈 **Recent User Contributions:**
+${recentList}
+
+🎯 **Translation Performance:**
+• **Tier 1 (Base):** <1ms, 100% verified Tulu
+• **Tier 2 (Taught):** <5ms, user-verified authentic  
+• **Tier 3 (Cache):** <50ms, previously translated
+• **Tier 4 (Tulu API):** 2-3s, authentic Tulu attempt
+• **Tier 5 (Teaching):** Community builds database
+
+🚀 **Building authentic Tulu - ${1000 - (Object.keys(tuluDictionary).length + taughtStats.count)} words to reach 1000!**`;
+
+    await bot.sendMessage(msg.chat.id, statsMessage, {parse_mode: 'Markdown'});
+});
+
+// Enhanced /learned command for taught dictionary
+bot.onText(/\/learned/, async (msg) => {
+    extendKeepAlive();
+    
+    const taughtStats = await getTaughtDictionaryStats();
+    
+    if (taughtStats.count === 0) {
+        await bot.sendMessage(msg.chat.id, `📝 **Taught Dictionary Empty**
+
+🎯 **Be the first contributor!**
+
+**How it works:**
+1️⃣ Ask me any English word/phrase
+2️⃣ If not found, I ask you to teach authentic Tulu
+3️⃣ Your word goes to taught_dictionary collection
+
+**Benefits:**
+${mongoAvailable ? '✅ **Permanent storage** - Never lost' : '✅ **Session storage** - Fast access'}
+✅ **Higher priority** - Your words beat API results
+✅ **Community building** - Preserve authentic Tulu
+
+**Start contributing now!**`, {parse_mode: 'Markdown'});
+        return;
+    }
+    
+    const recentList = taughtStats.recent
+        .map(w => `• "${w.english}" → "${w.tulu}"\n  👤 Contributor: ${w.contributor}\n  📅 Added: ${w.updatedAt.toLocaleDateString()}\n  🔄 Used: ${w.usage_count} times`)
+        .join('\n\n');
+    
+    const message = `📚 **Taught Dictionary Collection**
+
+🗄️ **Total User Contributions:** ${taughtStats.count} words
+${mongoAvailable ? '🌍 **Shared globally** with all users' : '💭 **Available in current session**'}
+
+**Recent Authentic Contributions:**
+${recentList}
+
+${taughtStats.count > 5 ? `\n*📊 ...and ${taughtStats.count - 5} more words in collection*\n` : ''}
+
+🎯 **Your Impact:**
+${mongoAvailable ? '✅ **Permanent cloud storage** - Helps everyone' : '✅ **Session storage** - Fast access'}
+✅ **Higher priority** - Always beats API translations
+✅ **Community resource** - Preserves authentic Tulu
+
+🔧 **Commands:**
+• **/correct <word>** - Update existing entries
+• Ask new words - Add to collection
+• **/stats** - See full analytics
+
+🌍 **Building authentic Tulu database together!**`;
+    
+    await bot.sendMessage(msg.chat.id, message, {parse_mode: 'Markdown'});
+});
+
+// Enhanced /correct command for taught dictionary
+bot.onText(/\/correct (.+)/, async (msg, match) => {
+    extendKeepAlive();
+    
+    const userId = msg.from.id;
+    const userName = msg.from.first_name || 'User';
+    const wordToCorrect = match[1].toLowerCase().trim();
+    
+    // Check taught dictionary
+    const taughtWords = await getCachedTaughtWords();
+    const fullDictionary = { ...tuluDictionary, ...taughtWords };
+    
+    if (fullDictionary[wordToCorrect]) {
+        const currentTranslation = fullDictionary[wordToCorrect];
+        
+        // Check if it's from base dictionary
+        if (tuluDictionary[wordToCorrect]) {
+            await bot.sendMessage(msg.chat.id, `❌ **Cannot Correct Base Dictionary**
+
+📝 **Word:** "${wordToCorrect}"
+🔒 **Current:** "${currentTranslation}"
+📚 **Source:** Built-in verified dictionary
+
+**Why can't I correct this?**
+Base dictionary words are verified Tulu. However, you can:
+
+1️⃣ **Add variation:** Ask me "${wordToCorrect} alternative" 
+2️⃣ **Teach regional version:** Use slightly different phrasing
+3️⃣ **Contribute new words:** Help expand taught dictionary
+
+💡 **Focus on teaching new authentic Tulu words!**`, {parse_mode: 'Markdown'});
+            return;
+        }
+        
+        // Set up correction mode for taught dictionary words
+        userStates[userId] = {
+            mode: 'correcting',
+            englishWord: wordToCorrect,
+            originalText: wordToCorrect,
+            oldTranslation: currentTranslation,
+            correctorName: userName,
+            timestamp: Date.now()
+        };
+        
+        await bot.sendMessage(msg.chat.id, `🔧 **Correction Mode**
+
+📝 **English:** "${wordToCorrect}"
+🔄 **Current Translation:** "${currentTranslation}"
+🗄️ **Source:** User-taught dictionary
+
+✏️ **Send the correct Tulu translation:**
+
+**What happens:**
+• Updates taught_dictionary collection
+• Your correction gets attribution
+• All users see improved translation
+
+**Commands:**
+• **/skip** - Cancel correction
+• Type correct translation to proceed
+
+⏰ **Expires in 10 minutes**`, {parse_mode: 'Markdown'});
+        
+        // Auto-expire correction
+        setTimeout(() => {
+            if (userStates[userId] && userStates[userId].mode === 'correcting' && 
+                userStates[userId].englishWord === wordToCorrect) {
+                delete userStates[userId];
+                bot.sendMessage(msg.chat.id, `⏰ **Correction expired for "${wordToCorrect}"**
+
+You can start a new correction anytime:
+**/correct ${wordToCorrect}**`).catch(() => {});
+            }
+        }, 10 * 60 * 1000);
+        
+    } else {
+        await bot.sendMessage(msg.chat.id, `❌ **Word Not Found**
+
+📝 **"${wordToCorrect}"** is not in any collection yet.
+
+🎯 **What you can do:**
+1️⃣ **Add it first:** Ask me "${wordToCorrect}" and teach the translation
+2️⃣ **Check spelling:** Verify the English word is correct
+3️⃣ **Browse words:** Use **/learned** to see taught dictionary
+
+💡 **Once you teach "${wordToCorrect}", you can use /correct to improve it.**`, {parse_mode: 'Markdown'});
+    }
+});
+
+// Skip/cancel command
+bot.onText(/\/skip|\/cancel/, (msg) => {
+    extendKeepAlive();
+    
+    const userId = msg.from.id;
+    const cleared = clearUserState(userId);
+    
+    if (cleared) {
+        bot.sendMessage(msg.chat.id, `✅ **Operation Cancelled**
+
+🔄 **Ready for new translations!**
+• Ask me any English word or phrase
+• Use **/correct <word>** to fix taught dictionary
+• Use **/stats** for performance metrics
+
+🗄️ **Collections ready** for your contributions`);
+    } else {
+        bot.sendMessage(msg.chat.id, `💭 **No active operation**
+
+🎯 **Try these features:**
+• Type any English word for translation
+• **/stats** - Performance and database statistics  
+• **/learned** - Browse taught dictionary
+• **/numbers** - Complete number reference
+
+⚡ **All optimized for maximum performance!**`);
+    }
+});
+
+// Numbers reference
+bot.onText(/\/numbers/, (msg) => {
+    extendKeepAlive();
+    
+    const numbersMessage = `🔢 **Complete Tulu Numbers (Roman)**
+
+**Basic (0-10):**
+0→pundu, 1→onji, 2→raddu, 3→muji, 4→nalku, 5→aidu  
+6→aaru, 7→elu, 8→enmu, 9→ombodu, 10→pattu
+
+**Teens (11-20):**
+11→pannondu, 12→panniraddu, 13→paddmuji, 14→paddnalku, 15→paddaidu  
+16→paddarru, 17→paddelu, 18→paddenmu, 19→paddombodu, 20→ippattu
+
+**Larger Numbers:**
+30→muppattu, 40→nalpattu, 50→aivattu, 60→aruvattu, 70→eppattu  
+80→enpattu, 90→tombattu, 100→nuru, 1000→saayira
+
+**Try it:**
+• Type "5" → aidu
+• Type "fifteen" → paddaidu  
+• Type "hundred" → nuru
+
+✅ All numbers in base dictionary - <1ms instant translation!
+📚 Part of ${Object.keys(tuluDictionary).length} verified base words`;
+
+    bot.sendMessage(msg.chat.id, numbersMessage, {parse_mode: 'Markdown'});
+});
+
 // Enhanced main message handler with corrected strategy
 bot.on('message', async (msg) => {
     if (msg.text && !msg.text.startsWith('/')) {
@@ -754,12 +1000,6 @@ bot.on('message', async (msg) => {
 🏛️ **Authentic Tulu:** ${userText}
 👤 **Contributor:** ${userName} (attributed)
 🗄️ **Stored in:** MongoDB ${storageType}
-💾 **Cache Status:** Immediately updated for instant access
-
-🌍 **Global Impact:** ${impact}
-🏆 **Priority:** Tier 2 - Higher than any API translation
-📈 **Performance:** <5ms lookup after cache refresh
-🏛️ **Authenticity:** Real Tulu from native speaker!
 
 **This is exactly how we build authentic Tulu database!**
 • API didn't have "${userState.originalText}"
@@ -820,16 +1060,8 @@ Please try again: Ask me "${userState.originalText}" and provide the authentic T
 🏛️ **Translation:** ${result.translation}
 
 📊 **Source:** ${result.source}
-⭐ **Performance:** ${priority}
-🗄️ **Database:** ${mongoAvailable ? 'Enhanced MongoDB Collections (Optimized)' : 'Memory + Tulu API'}`;
-
-                // Add tier-specific messaging
-                if (result.tier === 4 && result.needsVerification) {
-                    responseMessage += `
 
 🌐 **Google Translate Tulu API Result:**
-• Used authentic Tulu language code (tcy)
-• May be approximate translation
 • **Improve it:** **/correct ${userText.toLowerCase()}**
 • Your correction provides authentic Tulu for everyone`;
                 } else if (result.tier === 3) {
