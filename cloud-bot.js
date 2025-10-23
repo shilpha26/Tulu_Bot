@@ -1020,12 +1020,19 @@ bot.on('message', async (msg) => {
 
     const messageId = `${msg.chat.id}_${msg.message_id}`;
     const userId = msg.from.id;
-    
+
     // Prevent duplicate processing
     if (messageProcessing.has(messageId)) {
         return;
     }
     messageProcessing.add(messageId);
+
+    // Wake Render (non-blocking) — uses RENDER_EXTERNAL_URL if set, fallback to your public URL
+    const wakeUrl = process.env.RENDER_EXTERNAL_URL || 'https://tulu-bot.onrender.com/';
+    // Only ping non-localhost http(s) URLs
+    if (wakeUrl && !wakeUrl.includes('localhost') && /^https?:\/\//.test(wakeUrl)) {
+        pingRenderHost(wakeUrl);
+    }
 
     // ✅ FIXED: Ensure only one response per user query
     const responseKey = `${userId}_${Date.now()}`;
@@ -1339,3 +1346,28 @@ async function startBot() {
 
 // Start the complete authentic Tulu bot with performance optimization
 startBot();
+
+// Ping external host (non-blocking) to wake Render web service
+function pingRenderHost(url) {
+    if (!url) return;
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        fetch(url, {
+            method: 'GET',
+            signal: controller.signal,
+            headers: { 'User-Agent': 'TuluBot-Wakeup/1.0' }
+        })
+        .then(res => {
+            clearTimeout(timeout);
+            console.log(`⚡ Wake ping to ${url} -> ${res.status}`);
+        })
+        .catch(err => {
+            clearTimeout(timeout);
+            if (err && err.name === 'AbortError') console.log('⚠️ Wake ping timeout');
+            else console.log('⚠️ Wake ping failed:', err && err.message);
+        });
+    } catch (e) {
+        console.log('⚠️ Wake ping error:', e && e.message);
+    }
+}
