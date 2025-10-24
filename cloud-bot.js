@@ -141,19 +141,6 @@ function wakeUpService() {
     }, 1000);
 }
 
-// Helper function to categorize words for base dictionary
-function categorizeWord(english) {
-    if (['hello', 'hi', 'hey', 'goodbye', 'bye', 'good morning', 'good evening', 'good night'].includes(english)) return 'greetings';
-    if (['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'].includes(english)) return 'numbers';
-    if (['mother', 'father', 'brother', 'sister', 'grandfather', 'grandmother', 'uncle', 'aunt', 'son', 'daughter', 'husband', 'wife'].includes(english)) return 'family';
-    if (['red', 'green', 'blue', 'yellow', 'white', 'black'].includes(english)) return 'colors';
-    if (['yes', 'no', 'ok', 'okay', 'thank you', 'thanks', 'welcome', 'sorry', 'please'].includes(english)) return 'common';
-    if (['water', 'house', 'home', 'food', 'school', 'hospital', 'temple', 'market'].includes(english)) return 'places_things';
-    if (['sit', 'stand', 'sleep', 'walk', 'run', 'eat', 'drink', 'come', 'go'].includes(english)) return 'actions';
-    return 'general';
-}
-
-// Enhanced MongoDB connection for Render deployment
 async function initializeMongoDB() {
     if (!mongoUri) {
         console.log('⚠️ No MongoDB URI - using memory storage');
@@ -161,41 +148,23 @@ async function initializeMongoDB() {
     }
 
     try {
-        console.log('🔧 Connecting to MongoDB Atlas (Render-optimized)...');
+        console.log('🔧 Connecting to MongoDB Atlas (Render-compatible)...');
         
+        // ✅ FIXED: Simplified options - no TLS conflicts
         client = new MongoClient(mongoUri, {
-            // Enhanced SSL/TLS settings for Render
-            tls: true,
-            tlsAllowInvalidCertificates: false,
-            tlsAllowInvalidHostnames: false,
-            
-            // Render-optimized timeouts
-            serverSelectionTimeoutMS: 15000,  // Increased for Render
-            socketTimeoutMS: 30000,           // Increased for Render
-            connectTimeoutMS: 15000,          // Increased for Render
-            
-            // Connection settings
-            maxPoolSize: 3,                   // Reduced for Render
+            // Basic connection settings only
+            serverSelectionTimeoutMS: 15000,
+            socketTimeoutMS: 30000,
+            connectTimeoutMS: 15000,
+            maxPoolSize: 3,
             minPoolSize: 1,
             retryWrites: true,
             retryReads: true,
-            w: 'majority',
-            
-            // Authentication
-            authSource: 'admin',
-            
-            // Compression and family
-            compressors: ['zlib'],
-            family: 4,
-            
-            // Additional Render-specific settings
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-            bufferMaxEntries: 0,
-            bufferCommands: false
+            w: 'majority'
+            // ❌ REMOVED all TLS settings - let MongoDB handle it automatically
         });
         
-        // Connect with retry logic
+        // Rest of your connection logic...
         let connected = false;
         for (let attempt = 1; attempt <= 5; attempt++) {
             try {
@@ -219,7 +188,8 @@ async function initializeMongoDB() {
         
         console.log('✅ Connected to MongoDB Atlas - Enhanced Database Active');
         
-        // Rest of your initialization code...
+        // Initialize collections
+        await initializeCollections();
         await initializeBaseDictionary();
         
         const baseCount = await db.collection('base_dictionary').countDocuments();
@@ -234,9 +204,33 @@ async function initializeMongoDB() {
         
     } catch (error) {
         console.error('❌ MongoDB connection failed:', error.message);
-        console.error('🔍 Full error:', error);
         console.log('⚠️ Continuing with memory storage + API fallback');
         return false;
+    }
+}
+
+// Add missing initializeCollections function
+async function initializeCollections() {
+    try {
+        // Base Dictionary Collection
+        await db.collection('base_dictionary').createIndex({ english: 1 }, { unique: true });
+        await db.collection('base_dictionary').createIndex({ category: 1 });
+        await db.collection('base_dictionary').createIndex({ verified: 1 });
+        
+        // Taught Dictionary Collection  
+        await db.collection('taught_dictionary').createIndex({ english: 1 }, { unique: true });
+        await db.collection('taught_dictionary').createIndex({ updatedAt: -1 });
+        await db.collection('taught_dictionary').createIndex({ contributor: 1 });
+        
+        // API Cache Collection
+        await db.collection('api_cache').createIndex({ english: 1 }, { unique: true });
+        await db.collection('api_cache').createIndex({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 });
+        
+        console.log('✅ Enhanced collections created with comprehensive indexes');
+    } catch (indexError) {
+        if (indexError.code !== 85) {
+            console.log('⚠️ Index creation warning:', indexError.message);
+        }
     }
 }
 
