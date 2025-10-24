@@ -153,7 +153,7 @@ function categorizeWord(english) {
     return 'general';
 }
 
-// MongoDB initialization with base dictionary support
+// Enhanced MongoDB connection for Render deployment
 async function initializeMongoDB() {
     if (!mongoUri) {
         console.log('⚠️ No MongoDB URI - using memory storage');
@@ -161,61 +161,67 @@ async function initializeMongoDB() {
     }
 
     try {
-        console.log('🔧 Connecting to MongoDB Atlas (Enhanced Settings)...');
+        console.log('🔧 Connecting to MongoDB Atlas (Render-optimized)...');
         
         client = new MongoClient(mongoUri, {
+            // Enhanced SSL/TLS settings for Render
             tls: true,
             tlsAllowInvalidCertificates: false,
             tlsAllowInvalidHostnames: false,
-            serverSelectionTimeoutMS: 10000,
-            socketTimeoutMS: 20000,
-            connectTimeoutMS: 10000,
-            maxPoolSize: 5,
+            
+            // Render-optimized timeouts
+            serverSelectionTimeoutMS: 15000,  // Increased for Render
+            socketTimeoutMS: 30000,           // Increased for Render
+            connectTimeoutMS: 15000,          // Increased for Render
+            
+            // Connection settings
+            maxPoolSize: 3,                   // Reduced for Render
             minPoolSize: 1,
             retryWrites: true,
             retryReads: true,
             w: 'majority',
+            
+            // Authentication
             authSource: 'admin',
+            
+            // Compression and family
             compressors: ['zlib'],
-            family: 4
+            family: 4,
+            
+            // Additional Render-specific settings
+            useNewUrlParser: true,
+            useUnifiedTopology: true,
+            bufferMaxEntries: 0,
+            bufferCommands: false
         });
         
-        await client.connect();
-        db = client.db('tulu_translator');
-        await db.admin().ping();
-        
-        console.log('✅ Connected to MongoDB Atlas - Enhanced Database Active');
-        
-        // Create comprehensive collections with indexes
-        try {
-            // Base Dictionary Collection (MongoDB-based verified words)
-            await db.collection('base_dictionary').createIndex({ english: 1 }, { unique: true });
-            await db.collection('base_dictionary').createIndex({ category: 1 });
-            await db.collection('base_dictionary').createIndex({ verified: 1 });
-            await db.collection('base_dictionary').createIndex({ updatedAt: -1 });
-            
-            // Taught Dictionary Collection (User-contributed authentic Tulu)
-            await db.collection('taught_dictionary').createIndex({ english: 1 }, { unique: true });
-            await db.collection('taught_dictionary').createIndex({ updatedAt: -1 });
-            await db.collection('taught_dictionary').createIndex({ contributor: 1 });
-            await db.collection('taught_dictionary').createIndex({ usage_count: -1 });
-            
-            // API Cache Collection (API results for performance)
-            await db.collection('api_cache').createIndex({ english: 1 }, { unique: true });
-            await db.collection('api_cache').createIndex({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 });
-            await db.collection('api_cache').createIndex({ api_source: 1 });
-            
-            console.log('✅ Enhanced collections created with comprehensive indexes');
-        } catch (indexError) {
-            if (indexError.code !== 85) {
-                console.log('⚠️ Index creation warning:', indexError.message);
+        // Connect with retry logic
+        let connected = false;
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            try {
+                console.log(`🔄 MongoDB connection attempt ${attempt}/5...`);
+                await client.connect();
+                db = client.db('tulu_translator');
+                await db.admin().ping();
+                connected = true;
+                break;
+            } catch (attemptError) {
+                console.log(`⚠️ Connection attempt ${attempt} failed: ${attemptError.message}`);
+                if (attempt < 5) {
+                    await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+                }
             }
         }
         
-        // Initialize base dictionary from code to MongoDB
+        if (!connected) {
+            throw new Error('Failed to establish connection after 5 attempts');
+        }
+        
+        console.log('✅ Connected to MongoDB Atlas - Enhanced Database Active');
+        
+        // Rest of your initialization code...
         await initializeBaseDictionary();
         
-        // Get collection stats
         const baseCount = await db.collection('base_dictionary').countDocuments();
         const taughtCount = await db.collection('taught_dictionary').countDocuments();
         const cacheCount = await db.collection('api_cache').countDocuments();
@@ -228,6 +234,7 @@ async function initializeMongoDB() {
         
     } catch (error) {
         console.error('❌ MongoDB connection failed:', error.message);
+        console.error('🔍 Full error:', error);
         console.log('⚠️ Continuing with memory storage + API fallback');
         return false;
     }
@@ -869,8 +876,10 @@ app.post('/wake', express.json(), async (req, res) => {
 const userStates = {};
 let messageProcessing = new Set();
 
-// Enhanced bot startup
+// Enhanced bot startup with better conflict prevention
 let botStarted = false;
+let startupAttempts = 0;
+const MAX_STARTUP_ATTEMPTS = 3;
 
 async function startBotSafely() {
     if (botStarted) {
@@ -878,30 +887,52 @@ async function startBotSafely() {
         return;
     }
     
+    startupAttempts++;
+    
     try {
-        console.log('🤖 Starting enhanced bot with conflict prevention...');
+        console.log(`🤖 Starting enhanced bot (attempt ${startupAttempts}/${MAX_STARTUP_ATTEMPTS})...`);
         
+        // Force clear any existing webhooks and polling
         await bot.deleteWebHook();
-        console.log('🧹 Cleared any existing webhooks');
+        await bot.stopPolling();
+        console.log('🧹 Cleared any existing webhooks and polling');
         
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await bot.startPolling();
+        // Wait longer before starting to ensure cleanup
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Start with explicit options
+        await bot.startPolling({
+            restart: false,  // Don't restart on errors
+            polling: {
+                interval: 1000,
+                autoStart: false,
+                params: {
+                    timeout: 10
+                }
+            }
+        });
         
         botStarted = true;
-        console.log('✅ Bot polling started successfully (Optimized: 1000ms interval)');
+        console.log('✅ Bot polling started successfully');
         
+        // Test bot connection
         const botInfo = await bot.getMe();
         console.log(`🤖 Bot confirmed: @${botInfo.username}`);
         
     } catch (error) {
-        console.error('❌ Bot startup failed:', error.message);
+        console.error(`❌ Bot startup attempt ${startupAttempts} failed:`, error.message);
         
         if (error.message.includes('409') || error.message.includes('Conflict')) {
-            console.log('🔄 Conflict detected - retrying in 10 seconds...');
-            setTimeout(() => {
-                botStarted = false;
-                startBotSafely();
-            }, 10000);
+            if (startupAttempts < MAX_STARTUP_ATTEMPTS) {
+                console.log(`🔄 Conflict detected - retrying in ${startupAttempts * 10} seconds...`);
+                setTimeout(() => {
+                    botStarted = false;
+                    startBotSafely();
+                }, startupAttempts * 10000); // Exponential backoff
+            } else {
+                console.error('💀 Max startup attempts reached. Exiting...');
+                process.exit(1);
+            }
         } else {
             throw error;
         }
